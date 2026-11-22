@@ -82,7 +82,7 @@ async fn an_unchanged_working_agent_is_reported_stuck_once_to_each_device() {
     assert_eq!(sent(&bodies, PHONE_KEY, "stuck", "w1:pA"), 1, "{bodies:?}");
     assert_eq!(sent(&bodies, PHONE_KEY, "stuck", "w1:pB"), 1, "{bodies:?}");
     // 只帶密鑰、workspace 名稱、狀態與 pane id(後台多一個欄位就回 400)。
-    assert!(bodies.contains(&json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "stuck", "pane": "w1:pA"})));
+    assert!(bodies.contains(&json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "stuck", "pane": "w1:pA", "tab": "claude"})));
     // watch 靜音了 w1:pA 的聊天。
     assert_eq!(sent(&bodies, WATCH_KEY, "stuck", "w1:pA"), 0);
     assert_eq!(sent(&bodies, WATCH_KEY, "stuck", "w1:pB"), 1);
@@ -107,7 +107,7 @@ async fn an_agent_still_needing_you_is_reminded_once() {
     assert_eq!(sent(&backend.bodies(), PHONE_KEY, "reminder", "w1:pB"), 1);
     assert_eq!(
         backend.bodies().into_iter().find(|body| body["status"] == "reminder"),
-        Some(json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "reminder", "pane": "w1:pB"}))
+        Some(json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "reminder", "pane": "w1:pB", "tab": "claude"}))
     );
 }
 

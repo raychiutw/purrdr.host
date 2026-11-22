@@ -3,7 +3,13 @@
 #
 # Agent 進入 blocked(「需要你」)或 done(「完成」)時，對 ~/.purrdr/push-*/pairing 的每一支配對裝置呼叫 Purrdr 後台的 /v1/push;
 # 是否真的通知由後台依裝置偏好決定。
-# 請求只帶 workspace 名稱、狀態與 pane id(推播內容由後台組),不帶終端機標題或任何對話內容。
+# 請求只帶 workspace 名稱、狀態、pane id 與選用的 tab(推播內容由後台組),不帶終端機標題或任何對話內容。
+# tab 的規則(主機服務直接送時也一樣):有 Tab label 用它，沒有就用該 Pane 的 Agent 名稱，都沒有就省略這個欄位。
+# herdr 給外掛的 context 沒有 Tab label(文件只列 workspace、tab、focused pane 等 id 類欄位),所以問 herdr 兩次:
+# `herdr pane get <pane>` 取得該 pane 的 tab id 與 Agent 名稱,`herdr tab get <tab>` 取得 Tab label;
+# 第一支可用的配對裝置才問，整個事件只問一次;失敗(herdr 不在、pane 已關閉)就當作沒有。
+# 後台限制 tab 最長 100 字元、全空白視同沒帶:前後空白去掉、以字元計截斷，空白的 label 或 Agent 名稱視為沒有。
+# herdr 沒命名的 Tab 預設叫順序號(`1`、`2`…),不是使用者取的名字，視為沒有 Tab label。
 # 配對密鑰經 stdin 交給 curl,不出現在指令參數裡。
 # 沒有常駐程序;失敗不重試。
 # 後台回 410(裝置已被遠端關閉、配對撤銷)時刪掉那支裝置的配對資料夾，之後不再對它呼叫後台。
@@ -64,24 +70,55 @@ else
 fi
 
 session=
+tab=
+tab_field=
 asked=
+
+# 問 herdr 一次:該 pane 的 Agent session(靜音比對用)、Tab label 與 Agent 名稱(推播的 tab 欄位)。
+lookup_pane() {
+  asked=1
+  [ -n "$pane" ] || return 0
+  _info=$("${HERDR_BIN_PATH:-herdr}" pane get "$pane" 2>/dev/null)
+  session=$(printf '%s' "$_info" | sed -nE 's/.*"agent_session":\{[^}]*"value":"([^"\\]*)".*/\1/p' | head -n 1)
+  [ -n "$agent" ] || agent=$(json_string "$_info" agent)
+  _tab_id=$(json_string "$_info" tab_id)
+  case $_tab_id in
+    '' | *[!A-Za-z0-9:_.-]*) return 0 ;;
+  esac
+  tab=$(json_string "$("${HERDR_BIN_PATH:-herdr}" tab get "$_tab_id" 2>/dev/null)" label)
+}
+
+agent=$(json_string "${HERDR_PLUGIN_EVENT_JSON:-}" agent)
+
+# 後台的 tab 最長 100 字元(超過回 400)、全空白視同沒帶:去掉前後空白，再以字元計截斷。
+# 輸入是 JSON 字串的原樣內容:`\"`、`\uXXXX` 這類跳脫序列算一個字元、不被切開(截斷後仍是合法 JSON);
+# UTF-8 以位元組處理(LC_ALL=C,字元起頭是非 0x80-0xBF 的位元組),不依賴 herdr 給外掛的 locale。
+trim_tab() {
+  _low=$(printf '\200')
+  _high=$(printf '\277')
+  printf '%s' "$1" | LC_ALL=C sed -E -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//' \
+    -e "s/^((\\\\u[0-9a-fA-F]{4}|\\\\.|[^${_low}-${_high}][${_low}-${_high}]*){100}).*\$/\\1/"
+}
+
 for file in "$HOME"/.purrdr/push-*/pairing; do
   [ -f "$file" ] || continue
   key=$(sed -n 's/^key=//p' "$file" | head -n 1)
   endpoint=$(sed -n 's/^endpoint=//p' "$file" | head -n 1)
   [ -n "$key" ] && [ -n "$endpoint" ] || continue
-  # 這支裝置靜音了這個聊天(以 Agent 的 session 值識別)→ 跳過。有靜音時才問 herdr 一次。
-  if grep -q '^muted=' "$file"; then
-    if [ -z "$asked" ] && [ -n "$pane" ]; then
-      asked=1
-      session=$("${HERDR_BIN_PATH:-herdr}" pane get "$pane" 2>/dev/null |
-        sed -nE 's/.*"agent_session":\{[^}]*"value":"([^"\\]*)".*/\1/p' | head -n 1)
-    fi
-    if [ -n "$session" ] && grep -qxF "muted=$session" "$file"; then
-      continue
-    fi
+  if [ -z "$asked" ]; then
+    lookup_pane
+    tab=$(trim_tab "$tab")
+    agent=$(trim_tab "$agent")
+    # 數字(herdr 預設的順序號)不是 Tab label;沒有 Tab label 用 Agent 名稱，都沒有就不帶 tab。
+    case $tab in *[!0-9]*) ;; *) tab= ;; esac
+    [ -n "$tab" ] || tab=$agent
+    if [ -n "$tab" ]; then tab_field=',"tab":"'"$tab"'"'; else tab_field=; fi
   fi
-  code=$(printf '{"key":"%s","workspace":"%s","status":"%s"%s}' "$key" "$workspace" "$status" "$extra" |
+  # 這支裝置靜音了這個聊天(以 Agent 的 session 值識別)→ 跳過。
+  if [ -n "$session" ] && grep -qxF "muted=$session" "$file"; then
+    continue
+  fi
+  code=$(printf '{"key":"%s","workspace":"%s","status":"%s"%s%s}' "$key" "$workspace" "$status" "$extra" "$tab_field" |
     curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json' \
       --data-binary @- "$endpoint") || true
   # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。
