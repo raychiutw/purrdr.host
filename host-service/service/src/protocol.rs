@@ -96,6 +96,8 @@ pub enum ClientMessage {
     WorkspaceCreate(WorkspaceCreate),
     #[serde(rename = "workspace.rename")]
     WorkspaceRename(WorkspaceRename),
+    #[serde(rename = "tab.rename")]
+    TabRename(TabRename),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceClose),
     #[serde(rename = "worktree.create")]
@@ -137,7 +139,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::ClaudeUsageInstall(_) | ClientMessage::ClaudeUsageRemove(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::ClaudeUsageInstall(_) | ClientMessage::ClaudeUsageRemove(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::TabRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
     }
 }
 
@@ -219,6 +221,8 @@ pub enum ServerMessage {
     WorkspaceCreateResult(WorkspaceCreateResult),
     #[serde(rename = "workspace.rename.result")]
     WorkspaceRenameResult(WorkspaceRenameResult),
+    #[serde(rename = "tab.rename.result")]
+    TabRenameResult(TabRenameResult),
     #[serde(rename = "workspace.close.result")]
     WorkspaceCloseResult(WorkspaceCloseResult),
     #[serde(rename = "worktree.create.result")]
@@ -853,6 +857,24 @@ pub struct WorkspaceRename {
 /// 已重新命名。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRenameResult {
+    pub request_id: String,
+    /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// 重新命名 tab(herdr tab.rename)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabRename {
+    pub request_id: String,
+    pub tab_id: String,
+    /// 新名稱，不可空白。
+    pub label: String,
+}
+
+/// tab 已重新命名。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabRenameResult {
     pub request_id: String,
     /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]

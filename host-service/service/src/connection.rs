@@ -426,6 +426,7 @@ impl ClientConnection {
             }
             ClientMessage::WorkspaceCreate(request) => structure_operations::workspace_create(&self.herdr, request).await,
             ClientMessage::WorkspaceRename(request) => structure_operations::workspace_rename(&self.herdr, request).await,
+            ClientMessage::TabRename(request) => structure_operations::tab_rename(&self.herdr, request).await,
             ClientMessage::WorkspaceClose(request) => structure_operations::workspace_close(&self.herdr, request).await,
             ClientMessage::WorktreeCreate(request) => structure_operations::worktree_create(&self.herdr, request).await,
             ClientMessage::AgentStart(request) => structure_operations::agent_start(&self.herdr, request, &self.transcript_environment).await,
