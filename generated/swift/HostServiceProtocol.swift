@@ -43,6 +43,7 @@ extension HostServiceProtocol {
         case paneTerminalClose(PaneTerminalClose)
         case fileStat(FileStat)
         case fileRead(FileRead)
+        case directoryList(DirectoryList)
         case pushStatus(PushStatus)
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
@@ -100,6 +101,7 @@ extension HostServiceProtocol {
             case "pane.terminal.close": self = .paneTerminalClose(try PaneTerminalClose(from: decoder))
             case "file.stat": self = .fileStat(try FileStat(from: decoder))
             case "file.read": self = .fileRead(try FileRead(from: decoder))
+            case "directory.list": self = .directoryList(try DirectoryList(from: decoder))
             case "push.status": self = .pushStatus(try PushStatus(from: decoder))
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
@@ -199,6 +201,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .fileRead(let message):
                 try container.encode("file.read", forKey: .type)
+                try message.encode(to: encoder)
+            case .directoryList(let message):
+                try container.encode("directory.list", forKey: .type)
                 try message.encode(to: encoder)
             case .pushStatus(let message):
                 try container.encode("push.status", forKey: .type)
@@ -316,6 +321,7 @@ extension HostServiceProtocol {
         case paneTerminalFrame(PaneTerminalFrame)
         case paneTerminalClosed(PaneTerminalClosed)
         case fileStatResult(FileStatResult)
+        case directoryListResult(DirectoryListResult)
         case fileReadResult(FileReadResult)
         case pushStatusResult(PushStatusResult)
         case pushInstallResult(PushInstallResult)
@@ -376,6 +382,7 @@ extension HostServiceProtocol {
             case "pane.terminal.frame": self = .paneTerminalFrame(try PaneTerminalFrame(from: decoder))
             case "pane.terminal.closed": self = .paneTerminalClosed(try PaneTerminalClosed(from: decoder))
             case "file.stat.result": self = .fileStatResult(try FileStatResult(from: decoder))
+            case "directory.list.result": self = .directoryListResult(try DirectoryListResult(from: decoder))
             case "file.read.result": self = .fileReadResult(try FileReadResult(from: decoder))
             case "push.status.result": self = .pushStatusResult(try PushStatusResult(from: decoder))
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
@@ -478,6 +485,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .fileStatResult(let message):
                 try container.encode("file.stat.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .directoryListResult(let message):
+                try container.encode("directory.list.result", forKey: .type)
                 try message.encode(to: encoder)
             case .fileReadResult(let message):
                 try container.encode("file.read.result", forKey: .type)
@@ -603,13 +613,16 @@ extension HostServiceProtocol {
         public var herdr: HerdrServer
         /// 這支裝置配對成唯讀：寫入類操作會被拒絕(read_only_device),app 停用輸入。
         public var readOnly: Bool
+        /// 這台主機使用者家目錄的絕對路徑(0.12.0 起);主機找不到家目錄時省略。app 用它把 ~ 換成路徑、當作 directory.list 的起點;舊版主機沒有這個欄位。
+        public var homeDirectory: String?
 
-        public init(requestId: String, protocolVersion: Int, hostServiceVersion: String, herdr: HerdrServer, readOnly: Bool) {
+        public init(requestId: String, protocolVersion: Int, hostServiceVersion: String, herdr: HerdrServer, readOnly: Bool, homeDirectory: String? = nil) {
             self.requestId = requestId
             self.protocolVersion = protocolVersion
             self.hostServiceVersion = hostServiceVersion
             self.herdr = herdr
             self.readOnly = readOnly
+            self.homeDirectory = homeDirectory
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -618,6 +631,7 @@ extension HostServiceProtocol {
             case hostServiceVersion = "host_service_version"
             case herdr
             case readOnly = "read_only"
+            case homeDirectory = "home_directory"
         }
     }
 }
@@ -2528,6 +2542,52 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// 列出主機上一個資料夾裡的子資料夾名稱(0.12.0 起,raychiutw/purrdr.host#26):給 HTTPS 主機的新增聊天瀏覽資料夾。只回資料夾名稱，絕不回檔案或檔案內容。唯讀，唯讀裝置也可用。主機服務解析 symlink 後再比對排除清單(x-excluded-file-locations)與主機服務資料夾:資料夾本身在排除清單就拒絕(directory_not_allowed),排除的子項目不列出。資料夾不存在或不是資料夾回 directory_not_found,讀不了回 directory_unreadable,path 不是絕對路徑或含 . 或 .. 段落回 invalid_message。~ 由 app 以 welcome 的 home_directory 換成路徑，主機服務不展開。
+    public struct DirectoryList: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 主機上的絕對路徑(不可含 . 或 .. 段落)。
+        public var path: String
+
+        public init(requestId: String, path: String) {
+            self.requestId = requestId
+            self.path = path
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case path
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 子資料夾名稱(0.12.0 起):含隱藏(點開頭)資料夾，不分大小寫排序;指向資料夾的 symlink 以解析後的目標判斷,目標在排除清單就不列。超過 1000 筆時只回前面的，truncated 為 true。
+    public struct DirectoryListResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// 原樣回傳要求的 path(不解析 symlink)。
+        public var path: String
+        /// 子資料夾的名稱(不含路徑)。
+        public var directories: [String]
+        /// 子資料夾多於上限，directories 只含排序後的前面一段。
+        public var truncated: Bool
+
+        public init(requestId: String, path: String, directories: [String], truncated: Bool) {
+            self.requestId = requestId
+            self.path = path
+            self.directories = directories
+            self.truncated = truncated
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case path
+            case directories
+            case truncated
+        }
+    }
+}
+
+extension HostServiceProtocol {
     /// 主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。
     public struct FileStat: Codable, Sendable, Equatable {
         public var requestId: String
@@ -3411,6 +3471,9 @@ extension HostServiceProtocol {
         case paneChanged = "pane_changed"
         case cwdNotAllowed = "cwd_not_allowed"
         case notGitRepository = "not_git_repository"
+        case directoryNotFound = "directory_not_found"
+        case directoryNotAllowed = "directory_not_allowed"
+        case directoryUnreadable = "directory_unreadable"
         case queueFull = "queue_full"
         case queueItemUnknown = "queue_item_unknown"
         case internalError = "internal_error"

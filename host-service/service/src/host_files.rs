@@ -490,7 +490,7 @@ fn without_verbatim_prefix(path: &Path) -> Option<PathBuf> {
 }
 
 /// 解析 symlink 後的路徑(不存在時 `None`)。
-fn resolve(path: &Path) -> Option<PathBuf> {
+pub(crate) fn resolve(path: &Path) -> Option<PathBuf> {
     std::fs::canonicalize(path).ok().and_then(|resolved| without_verbatim_prefix(&resolved))
 }
 
@@ -500,7 +500,7 @@ fn version_of(contents: &[u8]) -> String {
 }
 
 /// 絕對路徑，沒有控制字元，也沒有 `.`／`..` 段落;Windows 只收磁碟機路徑(UNC 會送出 NTLM,ADS 讀到別的資料流)。
-fn is_plain_absolute(path: &str) -> bool {
+pub(crate) fn is_plain_absolute(path: &str) -> bool {
     let has_plain_segments = !path.chars().any(char::is_control) && !path.split(['/', '\\']).any(|segment| segment == "." || segment == "..");
     let is_absolute = if cfg!(windows) {
         let bytes = path.as_bytes();
@@ -518,7 +518,7 @@ fn is_under(path: &Path, root: &Path) -> bool {
     !root_keys.is_empty() && path_keys.len() > root_keys.len() && path_keys.starts_with(&root_keys)
 }
 
-fn is_under_or_same(path: &Path, root: &Path) -> bool {
+pub(crate) fn is_under_or_same(path: &Path, root: &Path) -> bool {
     let path_keys = comparison_keys(path);
     let root_keys = comparison_keys(root);
     !root_keys.is_empty() && path_keys.starts_with(&root_keys)

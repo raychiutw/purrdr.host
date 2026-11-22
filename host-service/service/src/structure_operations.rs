@@ -33,8 +33,15 @@ const DEFAULT_AGENT_START_TIMEOUT_MS: u64 = 30_000;
 
 /// 在主機上的資料夾建立 workspace,回傳 root pane。
 pub async fn workspace_create(herdr: &HerdrClient, request: WorkspaceCreate) -> ServerMessage {
+    if has_control_characters(&request.cwd) || !Path::new(&request.cwd).is_absolute() {
+        return invalid(request.request_id, "cwd must be an absolute path");
+    }
     if !is_existing_folder(&request.cwd).await {
-        return invalid(request.request_id, "cwd must be an absolute path to an existing folder on this host");
+        return error(
+            Some(request.request_id),
+            ErrorCode::DirectoryNotFound,
+            "cwd is not an existing folder on this host",
+        );
     }
     if request.label.as_deref().is_some_and(|label| !is_valid_label(label)) {
         return invalid(request.request_id, "label must not be blank or contain control characters");
@@ -187,9 +194,6 @@ fn is_valid_id(id: &str) -> bool {
 
 /// herdr 遇到不存在的資料夾會改開家目錄，所以先確認。
 async fn is_existing_folder(cwd: &str) -> bool {
-    if has_control_characters(cwd) || !Path::new(cwd).is_absolute() {
-        return false;
-    }
     let folder = PathBuf::from(cwd);
     blocking(move || folder.is_dir()).await
 }
