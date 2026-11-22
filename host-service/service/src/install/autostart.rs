@@ -13,6 +13,10 @@ const SYSTEMD_UNIT: &str = "purrdr-host-service.service";
 const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
 const RUN_VALUE: &str = "PurrdrHostService";
 
+/// 等 launchd 卸載舊 job 的輪詢間隔與次數(合計約 10 秒)。
+const UNLOAD_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(50);
+const UNLOAD_POLL_LIMIT: u32 = 200;
+
 /// 自動啟動的登記檔(macOS plist、Linux unit);沒有檔案的平台回 None。
 pub(super) fn registration_file(layout: &ServiceLayout) -> Option<PathBuf> {
     match layout.platform {
@@ -106,7 +110,9 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
     match layout.platform {
         InstallPlatform::MacOs => {
             let domain = gui_domain(system)?;
-            let _ = system.run("launchctl", &["bootout".into(), format!("{domain}/{LAUNCH_AGENT_LABEL}")]);
+            let job = format!("{domain}/{LAUNCH_AGENT_LABEL}");
+            let _ = system.run("launchctl", &["bootout".into(), job.clone()]);
+            wait_until_unloaded(system, &job);
         }
         InstallPlatform::Linux => {
             let _ = system.run("systemctl", &arguments(&["--user", "disable", "--now", SYSTEMD_UNIT]));
@@ -123,6 +129,22 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
         let _ = system.run("systemctl", &arguments(&["--user", "daemon-reload"]));
     }
     Ok(())
+}
+
+/// `launchctl bootout` 是非同步的:回傳時舊 job 可能還沒卸載完，這時馬上 `bootstrap` 會回 error 5
+/// (raychiutw/purrdr.host#51)。輪詢 `launchctl print` 直到 job 消失;等不到就放行，由後面的 bootstrap 回報錯誤。
+fn wait_until_unloaded(system: &mut impl HostSystem, job: &str) {
+    for attempt in 0..UNLOAD_POLL_LIMIT {
+        let still_loaded = system
+            .run("launchctl", &["print".into(), job.to_owned()])
+            .is_ok_and(|output| output.success);
+        if !still_loaded {
+            return;
+        }
+        if attempt + 1 < UNLOAD_POLL_LIMIT {
+            std::thread::sleep(UNLOAD_POLL_INTERVAL);
+        }
+    }
 }
 
 /// 系統是否登記了自動啟動。
