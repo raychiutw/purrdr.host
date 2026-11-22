@@ -10,6 +10,7 @@ mod agent_push;
 pub mod attention;
 pub mod audit_log;
 pub mod auto_update;
+mod claude_usage;
 pub mod codex_usage;
 mod connection;
 pub mod device_store;
