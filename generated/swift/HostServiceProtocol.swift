@@ -2658,7 +2658,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
+    /// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。0.12.0 起主機服務能直接送推播(回覆的 direct_push 為 true)時只寫配對、不安裝外掛;主機服務不能接手(例如已裝舊版外掛 0.1.0)時行為不變。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
     public struct PushInstall: Codable, Sendable, Equatable {
         public var requestId: String
         /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -2680,7 +2680,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
+    /// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。主機服務直接送時沒有安裝紀錄，也就不會執行 uninstall。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
     public struct PushRemove: Codable, Sendable, Equatable {
         public var requestId: String
         /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -2732,12 +2732,15 @@ extension HostServiceProtocol {
         public var paired: Bool
         /// 其他已配對裝置數(不含這支;不提供其他裝置的識別資訊)。
         public var otherDevices: Int
+        /// 0.12.0 起(選用;舊版主機服務沒有):主機服務會直接送 blocked／done 推播(Agent 觀察者執行中，且沒有裝會重複送的舊版外掛 purrdr.push 0.1.0)。true 時 push.install 不安裝外掛。沒有這個欄位等同 false。
+        public var directPush: Bool?
 
-        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int) {
+        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int, directPush: Bool? = nil) {
             self.requestId = requestId
             self.pluginInstalled = pluginInstalled
             self.paired = paired
             self.otherDevices = otherDevices
+            self.directPush = directPush
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -2745,6 +2748,7 @@ extension HostServiceProtocol {
             case pluginInstalled = "plugin_installed"
             case paired
             case otherDevices = "other_devices"
+            case directPush = "direct_push"
         }
     }
 }
@@ -2756,12 +2760,15 @@ extension HostServiceProtocol {
         public var pluginInstalled: Bool
         public var paired: Bool
         public var otherDevices: Int
+        /// 0.12.0 起(選用):同 push.status.result。
+        public var directPush: Bool?
 
-        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int) {
+        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int, directPush: Bool? = nil) {
             self.requestId = requestId
             self.pluginInstalled = pluginInstalled
             self.paired = paired
             self.otherDevices = otherDevices
+            self.directPush = directPush
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -2769,6 +2776,7 @@ extension HostServiceProtocol {
             case pluginInstalled = "plugin_installed"
             case paired
             case otherDevices = "other_devices"
+            case directPush = "direct_push"
         }
     }
 }
@@ -2780,12 +2788,15 @@ extension HostServiceProtocol {
         public var pluginInstalled: Bool
         public var paired: Bool
         public var otherDevices: Int
+        /// 0.12.0 起(選用):同 push.status.result。
+        public var directPush: Bool?
 
-        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int) {
+        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int, directPush: Bool? = nil) {
             self.requestId = requestId
             self.pluginInstalled = pluginInstalled
             self.paired = paired
             self.otherDevices = otherDevices
+            self.directPush = directPush
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -2793,6 +2804,7 @@ extension HostServiceProtocol {
             case pluginInstalled = "plugin_installed"
             case paired
             case otherDevices = "other_devices"
+            case directPush = "direct_push"
         }
     }
 }
@@ -2827,12 +2839,15 @@ extension HostServiceProtocol {
         public var pluginInstalled: Bool
         public var paired: Bool
         public var otherDevices: Int
+        /// 0.12.0 起(選用):不問 herdr,所以這個回覆不帶這個欄位(要確認請用 push.status)。
+        public var directPush: Bool?
 
-        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int) {
+        public init(requestId: String, pluginInstalled: Bool, paired: Bool, otherDevices: Int, directPush: Bool? = nil) {
             self.requestId = requestId
             self.pluginInstalled = pluginInstalled
             self.paired = paired
             self.otherDevices = otherDevices
+            self.directPush = directPush
         }
 
         private enum CodingKeys: String, CodingKey {
@@ -2840,6 +2855,7 @@ extension HostServiceProtocol {
             case pluginInstalled = "plugin_installed"
             case paired
             case otherDevices = "other_devices"
+            case directPush = "direct_push"
         }
     }
 }

@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::process::Command;
 use tokio::sync::Mutex;
 
+use crate::direct_push::PluginPresence;
 use crate::herdr_cli::HerdrCli;
 use crate::protocol::{PushInstallResult, PushPairing, PushRemoveResult, PushStatusResult, PushUpdateMutedResult, ServerMessage};
 use crate::update_push::{HttpPushTransport, Pairing};
@@ -44,6 +45,8 @@ pub(crate) struct PushState {
     pub plugin_installed: bool,
     pub paired: bool,
     pub other_devices: i64,
+    /// 主機服務會直接送 blocked／done(0.12.0 起);此時 `push.install` 不裝外掛。
+    pub direct_push: bool,
 }
 
 impl PushState {
@@ -53,6 +56,7 @@ impl PushState {
             plugin_installed: state.plugin_installed,
             paired: state.paired,
             other_devices: state.other_devices,
+            direct_push: Some(state.direct_push),
         })
     }
 
@@ -62,6 +66,7 @@ impl PushState {
             plugin_installed: state.plugin_installed,
             paired: state.paired,
             other_devices: state.other_devices,
+            direct_push: Some(state.direct_push),
         })
     }
 
@@ -71,6 +76,7 @@ impl PushState {
             plugin_installed: state.plugin_installed,
             paired: state.paired,
             other_devices: state.other_devices,
+            direct_push: None,
         })
     }
 
@@ -80,6 +86,7 @@ impl PushState {
             plugin_installed: state.plugin_installed,
             paired: state.paired,
             other_devices: state.other_devices,
+            direct_push: Some(state.direct_push),
         })
     }
 }
@@ -112,6 +119,8 @@ pub(crate) struct PushPlugin {
     herdr: HerdrCli,
     home: Option<PathBuf>,
     serial: Arc<Mutex<()>>,
+    /// Agent 觀察者有在執行(能直接送 blocked／done)。還要外掛不是舊版才算真的能直接送。
+    observer_running: bool,
 }
 
 impl PushPlugin {
@@ -120,7 +129,14 @@ impl PushPlugin {
             herdr,
             home,
             serial: Arc::new(Mutex::new(())),
+            observer_running: false,
         }
+    }
+
+    /// 標記 Agent 觀察者有在執行(主機服務直接送推播的前提)。
+    pub fn with_observer(mut self, running: bool) -> Self {
+        self.observer_running = running;
+        self
     }
 
     pub async fn status(&self, device_id: &str) -> Result<PushState, PushFailure> {
@@ -136,10 +152,11 @@ impl PushPlugin {
         let _serial = self.serial.lock().await;
         let purrdr = self.purrdr_directory()?;
         let device_directory = purrdr.join(format!("push-{device_id}"));
-        let plugin_installed = self.plugin_installed().await?;
+        let presence = self.plugin_presence().await?;
         let before = FeatureBackup::take(&purrdr, &device_directory)?;
         write_feature(&device_directory, &[("pairing", contents.as_str())])?;
-        if !plugin_installed {
+        // 主機服務會直接送(0.12.0 起)就不裝外掛:同一則通知不會由兩邊各送一次，Windows 也不用 git。
+        if presence == PluginPresence::Absent && !self.observer_running {
             let marker = purrdr.join(PLUGIN_MARKER);
             let marker_existed = marker.exists();
             let installed = match write_feature(&marker, &[("source", &format!("{PLUGIN_SOURCE}\n"))]) {
@@ -180,6 +197,7 @@ impl PushPlugin {
             plugin_installed: true,
             paired: true,
             other_devices: other_pairings(&purrdr, device_id),
+            direct_push: false,
         })
     }
 
@@ -219,7 +237,7 @@ impl PushPlugin {
         remove_directory(&purrdr.join(format!("push-{device_id}")))?;
         let marker = purrdr.join(PLUGIN_MARKER);
         if other_pairings(&purrdr, device_id) == 0 && marker.join("journal.json").is_file() {
-            if self.plugin_installed().await? {
+            if self.plugin_presence().await?.installed() {
                 self.run(self.herdr.program_arguments(), &["plugin", "uninstall", PLUGIN_ID], COMMAND_TIMEOUT)
                     .await?;
             }
@@ -230,9 +248,10 @@ impl PushPlugin {
 
     async fn state(&self, device_id: &str) -> Result<PushState, PushFailure> {
         let purrdr = self.purrdr_directory()?;
-        let plugin_installed = self.plugin_installed().await?;
+        let presence = self.plugin_presence().await?;
         Ok(PushState {
-            plugin_installed,
+            plugin_installed: presence.installed(),
+            direct_push: self.observer_running && presence.host_service_may_send(),
             paired: purrdr.join(format!("push-{device_id}")).join("pairing").is_file(),
             other_devices: other_pairings(&purrdr, device_id),
         })
@@ -246,7 +265,11 @@ impl PushPlugin {
     }
 
     /// 經執行中的 herdr 伺服器查詢，所以帶 `--session`。
-    async fn plugin_installed(&self) -> Result<bool, PushFailure> {
+    pub async fn presence(&self) -> Result<PluginPresence, PushFailure> {
+        self.plugin_presence().await
+    }
+
+    async fn plugin_presence(&self) -> Result<PluginPresence, PushFailure> {
         let stdout = self
             .run(
                 &self.herdr.leading_arguments(),
@@ -254,7 +277,7 @@ impl PushPlugin {
                 COMMAND_TIMEOUT,
             )
             .await?;
-        Ok(lists_plugin(&stdout))
+        Ok(PluginPresence::from_list(&stdout))
     }
 
     /// 執行 herdr,回傳 stdout;非 0 結束時以 stderr(沒有就 stdout)為失敗訊息。
@@ -282,16 +305,6 @@ impl PushPlugin {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(PushFailure::Herdr(if stderr.is_empty() { stdout.trim().to_owned() } else { stderr }))
     }
-}
-
-/// `herdr plugin list --json` 的 `result.plugins` 裡有 purrdr.push。
-fn lists_plugin(stdout: &str) -> bool {
-    let Ok(list) = serde_json::from_str::<Value>(stdout.trim()) else {
-        return false;
-    };
-    list["result"]["plugins"]
-        .as_array()
-        .is_some_and(|plugins| plugins.iter().any(|plugin| plugin["plugin_id"] == PLUGIN_ID))
 }
 
 /// 會拼進主機路徑：只接受 1～64 個小寫英數與 `-`,且不能是 `plugin`(與 app 的 `PushHost.isValidDeviceID` 相同)。

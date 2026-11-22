@@ -13,6 +13,7 @@ pub mod auto_update;
 pub mod codex_usage;
 mod connection;
 pub mod device_store;
+mod direct_push;
 mod git_changes;
 pub mod herdr_cli;
 pub mod herdr_client;
@@ -144,6 +145,8 @@ pub struct RunningHostService {
     upload_cleanup: Option<tokio::task::JoinHandle<()>>,
     /// Agent 觀察者的常駐 task。
     observer: Option<tokio::task::JoinHandle<()>>,
+    /// 直接送推播的 lease;停止時收回，外掛才會立刻接回。
+    lease: Option<direct_push::Lease>,
 }
 
 impl RunningHostService {
@@ -167,6 +170,9 @@ impl Drop for RunningHostService {
         if let Some(observer) = &self.observer {
             observer.abort();
         }
+        if let Some(lease) = &self.lease {
+            lease.remove();
+        }
     }
 }
 
@@ -186,16 +192,24 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
             .collect();
         (!directories.is_empty()).then(|| uploads::spawn_cleanup(directories, log.clone(), std::time::SystemTime::now))
     };
+    let socket_path = config.herdr_socket.path().to_owned();
     let herdr = HerdrClient::new(config.herdr_socket);
+    let push = push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()).with_observer(config.observer.is_some());
+    // 主機服務直接送 blocked／done 與維護 lease(raychiutw/purrdr.host#48):需要觀察者與家目錄。
+    let direct = config
+        .observer
+        .and(config.transcripts.home.as_deref())
+        .map(|home| direct_push::DirectDelivery::new(push.clone(), home, &socket_path));
+    let lease = direct.as_ref().map(direct_push::DirectDelivery::lease);
     let observer = config.observer.map(|options| {
         let observer = agent_observer::AgentObserver::load(&config.state_directory);
-        let task = agent_observer::spawn(herdr.clone(), observer.clone(), options, config.transcripts.home.clone());
+        let task = agent_observer::spawn(herdr.clone(), observer.clone(), options, config.transcripts.home.clone(), direct);
         (observer, task)
     });
     let router = http::router(http::ServiceContext {
         herdr,
         observer: observer.as_ref().map(|(observer, _)| observer.clone()),
-        push: push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()),
+        push,
         herdr_cli: config.herdr_cli,
         codex_cli: config.codex_cli,
         devices: DeviceStore::new(&config.state_directory),
@@ -222,5 +236,6 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         accept_loop,
         upload_cleanup,
         observer: observer.map(|(_, task)| task),
+        lease,
     })
 }
