@@ -328,18 +328,19 @@ struct TranscriptMentions {
 
 impl MentionIndex {
     fn mentions(&mut self, transcripts: &[PathBuf], requested: &str) -> bool {
-        transcripts.iter().any(|transcript| {
-            let mentions = self.transcripts.entry(transcript.clone()).or_default();
-            mentions.catch_up(transcript);
-            mentions.paths.contains(requested)
-        })
+        self.any_transcript(transcripts, |mentions| mentions.paths.contains(requested))
     }
 
     fn prompted(&mut self, transcripts: &[PathBuf], requested: &str) -> bool {
+        self.any_transcript(transcripts, |mentions| mentions.prompted_paths.contains(requested))
+    }
+
+    /// 每份對話紀錄先讀到最新，再看有沒有任何一份符合。
+    fn any_transcript(&mut self, transcripts: &[PathBuf], matches: impl Fn(&TranscriptMentions) -> bool) -> bool {
         transcripts.iter().any(|transcript| {
             let mentions = self.transcripts.entry(transcript.clone()).or_default();
             mentions.catch_up(transcript);
-            mentions.prompted_paths.contains(requested)
+            matches(mentions)
         })
     }
 }

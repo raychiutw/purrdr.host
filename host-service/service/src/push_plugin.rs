@@ -135,13 +135,13 @@ pub(crate) enum PushFailure {
 
 impl std::fmt::Display for PushFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PushFailure::InvalidRequest(message) => formatter.write_str(message),
-            PushFailure::HerdrUnavailable(message) | PushFailure::Herdr(message) | PushFailure::SendFailed(message) | PushFailure::Internal(message) => {
-                formatter.write_str(message)
-            }
-            PushFailure::NotPaired => formatter.write_str("not paired"),
-        }
+        // InvalidRequest 帶 `&'static str`、其餘帶 `String`,型別不同不能併成同一個 or-pattern,所以先統一成 `&str`。
+        let message = match self {
+            PushFailure::InvalidRequest(message) => message,
+            PushFailure::HerdrUnavailable(message) | PushFailure::Herdr(message) | PushFailure::SendFailed(message) | PushFailure::Internal(message) => message,
+            PushFailure::NotPaired => "not paired",
+        };
+        formatter.write_str(message)
     }
 }
 
