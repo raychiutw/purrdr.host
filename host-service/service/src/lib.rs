@@ -29,6 +29,7 @@ mod pane_guard;
 mod pane_screen;
 mod pane_terminal;
 mod push_plugin;
+pub use push_plugin::{PluginUpdate, update_plugin as update_push_plugin};
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
 pub mod remote_management;
