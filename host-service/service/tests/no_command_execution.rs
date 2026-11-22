@@ -1,13 +1,14 @@
 //! 主機服務不提供任意指令執行、不呼叫 `herdr remote-api-bridge`(ADR-0010):直接連 herdr socket。
 //! 例外只有本機的安裝指令(#62)執行 tailscale、launchctl 等固定程式(`install/system.rs`),
 //! Pane 終端機(#61)以子行程執行 `herdr terminal session control|observe`(`pane_terminal.rs`),
-//! 以及推播外掛代裝(raychiutw/purrdr.ios#261)執行 `herdr plugin list|install|uninstall`(`push_plugin.rs`)。
+//! 以及推播外掛代裝(raychiutw/purrdr.ios#261)執行 `herdr plugin list|install|uninstall`(`push_plugin.rs`)、
+//! Codex 方案用量(raychiutw/purrdr.host#62)執行 `codex app-server`(`codex_usage.rs`)。都是固定的指令，參數不來自 app。
 
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN: [&str; 5] = ["remote-api-bridge", "std::process::Command", "tokio::process", "Command::new", "process::Stdio"];
 /// 可以執行子行程的檔案(相對 `src/`)。
-const PROCESS_ALLOWED: [&str; 3] = ["install/system.rs", "pane_terminal.rs", "push_plugin.rs"];
+const PROCESS_ALLOWED: [&str; 4] = ["codex_usage.rs", "install/system.rs", "pane_terminal.rs", "push_plugin.rs"];
 
 fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
@@ -83,4 +84,15 @@ fn websocket_connections_cannot_reach_the_installer() {
     let connection = std::fs::read_to_string(source_directory().join("connection.rs")).unwrap();
 
     assert!(!connection.contains("install"), "connection.rs 不能用到安裝模組");
+}
+
+#[test]
+fn codex_usage_only_runs_codex_app_server() {
+    let source = std::fs::read_to_string(source_directory().join("codex_usage.rs")).unwrap();
+
+    assert_eq!(source.matches("Command::new(").count(), 1, "只能有一個子行程");
+    assert!(source.contains("Command::new(&program)"));
+    assert_eq!(source.matches(".arg(").count(), 1, "唯一的參數是 app-server");
+    assert!(source.contains(r#".arg("app-server")"#));
+    assert!(source.contains(".args(&cli.program_arguments)"), "其他參數只有測試的假 codex 用的固定參數");
 }

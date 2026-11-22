@@ -35,6 +35,7 @@ const MAX_DEVICE_NAME_LENGTH: usize = 64;
 pub(crate) struct ServiceContext {
     pub herdr: HerdrClient,
     pub herdr_cli: HerdrCli,
+    pub codex_cli: crate::codex_usage::CodexCli,
     pub devices: DeviceStore,
     pub audit: AuditLog,
     /// 主機服務自己的 log(`logs/host-service.log`)。

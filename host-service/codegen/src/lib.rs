@@ -22,6 +22,7 @@ const HEADER: &str = "由 protocol/host-service.schema.json 產生，不要手�
 enum FieldType {
     String,
     Integer,
+    Number,
     Boolean,
     Reference(String),
     Array(Box<FieldType>),
@@ -251,6 +252,7 @@ fn parse_field_type(property: &Value) -> Result<FieldType, String> {
     match property["type"].as_str() {
         Some("string") => Ok(FieldType::String),
         Some("integer") => Ok(FieldType::Integer),
+        Some("number") => Ok(FieldType::Number),
         Some("boolean") => Ok(FieldType::Boolean),
         Some("array") => Ok(FieldType::Array(Box::new(parse_field_type(&property["items"])?))),
         other => Err(format!("不支援的欄位型別 {other:?}")),
@@ -287,6 +289,7 @@ fn rust_type(field_type: &FieldType) -> String {
     match field_type {
         FieldType::String => "String".into(),
         FieldType::Integer => "i64".into(),
+        FieldType::Number => "f64".into(),
         FieldType::Boolean => "bool".into(),
         FieldType::Reference(name) => name.clone(),
         FieldType::Array(item) => format!("Vec<{}>", rust_type(item)),
@@ -302,7 +305,8 @@ fn rust_definition(definition: &Definition) -> String {
             write_variants,
         } => {
             let mut output = doc_comment(description, "");
-            output += "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(tag = \"type\")]\n";
+            // 欄位可能是 f64(schema 的 number),沒有 Eq。
+            output += "#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n#[serde(tag = \"type\")]\n";
             output += &format!("pub enum {name} {{\n");
             for (tag, target) in variants {
                 output += &format!("    #[serde(rename = \"{tag}\")]\n    {target}({target}),\n");
@@ -330,7 +334,7 @@ fn rust_definition(definition: &Definition) -> String {
         }
         Definition::Object { name, description, fields, .. } => {
             let mut output = doc_comment(description, "");
-            output += "#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n";
+            output += "#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]\n";
             output += &format!("pub struct {name} {{\n");
             for field in fields {
                 output += &doc_comment(&field.description, "    ");
@@ -351,6 +355,7 @@ fn swift_type(field_type: &FieldType) -> String {
     match field_type {
         FieldType::String => "String".into(),
         FieldType::Integer => "Int".into(),
+        FieldType::Number => "Double".into(),
         FieldType::Boolean => "Bool".into(),
         FieldType::Reference(name) => name.clone(),
         FieldType::Array(item) => format!("[{}]", swift_type(item)),

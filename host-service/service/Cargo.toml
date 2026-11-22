@@ -69,6 +69,10 @@ harness = false
 name = "push_plugin"
 harness = false
 
+[[test]]
+name = "codex_usage"
+harness = false
+
 # 自己當「呼叫端」程序，所以不用 libtest。
 [[test]]
 name = "detached_stdio"
