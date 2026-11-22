@@ -2,7 +2,10 @@
 # herdr 的 plugin 在 Windows 仍是 preview,這個腳本沒有在 Windows 主機上實測。
 #
 # 行為與 notify.sh 相同:Agent 進入 blocked 或 done 時，對 %USERPROFILE%\.purrdr\push-*\pairing 的每一支配對裝置
-# 呼叫 Purrdr 後台的 /v1/push,只帶 workspace 名稱、狀態與 pane id,不帶任何對話內容;後台回 410 就刪掉該配對。
+# 呼叫 Purrdr 後台的 /v1/push,只帶 workspace 名稱、狀態、pane id 與選用的 tab,不帶任何對話內容;後台回 410 就刪掉該配對。
+# tab 的規則(主機服務直接送時也一樣):有 Tab label 用它，沒有就用該 Pane 的 Agent 名稱，都沒有就省略這個欄位。
+# herdr 給外掛的 context 沒有 Tab label,所以問 herdr:`herdr pane get <pane>` 取得 tab id 與 Agent 名稱，`herdr tab get <tab>` 取得 Tab label;
+# 第一支可用的配對裝置才問，整個事件只問一次;失敗就當作沒有。herdr 沒命名的 Tab 預設叫順序號(`1`、`2`…),視為沒有 Tab label。
 # 檔案帶 UTF-8 BOM:Windows PowerShell 5.1 讀沒有 BOM 的檔案會用系統字碼頁，中文註解會讓整支腳本解析失敗。
 #
 # 0.2.0 起讓位給主機服務(raychiutw/purrdr.host#48):主機服務自己送 blocked／done 時會維護
@@ -56,6 +59,8 @@ if ([string]::IsNullOrEmpty($workspace)) { exit 0 }
 
 $herdr = if ($env:HERDR_BIN_PATH) { $env:HERDR_BIN_PATH } else { 'herdr' }
 $session = $null
+$tab = $null
+$agent = [string]$event.data.agent
 $asked = $false
 
 $root = Join-Path $env:USERPROFILE '.purrdr'
@@ -69,20 +74,41 @@ foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -Filter 'push
     $endpoint = ($lines | Where-Object { $_ -like 'endpoint=*' } | Select-Object -First 1) -replace '^endpoint=', ''
     if (-not $key -or -not $endpoint) { continue }
 
-    $muted = @($lines | Where-Object { $_ -like 'muted=*' } | ForEach-Object { $_.Substring(6) })
-    if ($muted.Count -gt 0) {
-        if (-not $asked -and $pane) {
-            $asked = $true
+    if (-not $asked) {
+        $asked = $true
+        $tabId = ''
+        if ($pane) {
             try {
                 $info = & $herdr pane get $pane 2>$null | ConvertFrom-Json
                 $session = [string]$info.result.pane.agent_session.value
+                if (-not $agent) { $agent = [string]$info.result.pane.agent }
+                $tabId = [string]$info.result.pane.tab_id
             } catch {}
         }
-        if ($session -and ($muted -contains $session)) { continue }
+        if ($tabId -match '^[A-Za-z0-9:_.-]{1,64}$') {
+            try {
+                $tab = [string]((& $herdr tab get $tabId 2>$null | ConvertFrom-Json).result.tab.label)
+            } catch {}
+        }
+        $tab = ([string]$tab).Trim()
+        $agent = ([string]$agent).Trim()
+        # 順序號(herdr 預設的 Tab 名稱)或空字串(含全空白)不是 Tab label。
+        if ($tab -match '^[0-9]*$') { $tab = $null }
+        if (-not $tab) { $tab = $agent }
+        # 後台的 tab 最長 100 字元:截斷(以 UTF-16 單位算，只會少不會多;不切開代理對)。
+        if ($tab -and $tab.Length -gt 100) {
+            $tab = $tab.Substring(0, 100)
+            if ([char]::IsHighSurrogate($tab[99])) { $tab = $tab.Substring(0, 99) }
+            $tab = $tab.TrimEnd()
+        }
     }
+
+    $muted = @($lines | Where-Object { $_ -like 'muted=*' } | ForEach-Object { $_.Substring(6) })
+    if ($muted.Count -gt 0 -and $session -and ($muted -contains $session)) { continue }
 
     $body = [ordered]@{ key = $key; workspace = $workspace; status = $status }
     if ($pane) { $body.pane = $pane }
+    if ($tab) { $body.tab = $tab }
     try {
         Invoke-RestMethod -Method Post -Uri $endpoint -ContentType 'application/json' -TimeoutSec 10 `
             -Body ([System.Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))) | Out-Null

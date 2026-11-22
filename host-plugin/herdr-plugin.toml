@@ -3,10 +3,12 @@
 # 由 Purrdr app 經 SSH 以 `herdr plugin install raychiutw/purrdr.host/host-plugin --yes` 安裝，
 # 配對資料在 ~/.purrdr/push-<裝置>/pairing(由 app 寫入、關閉推播時移除)。
 # 0.2.0 起主機服務能直接送時(它寫的 ~/.purrdr/host-service/push-sender 新鮮且同一個 herdr socket)，外掛會讓位。
-# 推播只帶 workspace 名稱、狀態與 pane id,不帶任何對話內容。
+# 0.2.1 起推播多帶選用的 tab(raychiutw/purrdr.host#74):有 Tab label 用它，沒有用該 Pane 的 Agent 名稱，都沒有就省略;
+# 最長 100 字元。herdr 給外掛的 context 沒有 Tab label,外掛問 herdr(`pane get`、`tab get`)取得。
+# 推播只帶 workspace 名稱、狀態、pane id 與 tab,不帶任何對話內容或終端機標題。
 id = "purrdr.push"
 name = "Purrdr Push"
-version = "0.2.0"
+version = "0.2.1"
 min_herdr_version = "0.9.5"
 description = "Notify Purrdr on your iPhone or iPad when an agent needs you or finishes"
 platforms = ["linux", "macos", "windows"]

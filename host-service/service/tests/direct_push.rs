@@ -238,9 +238,10 @@ async fn blocked_and_done_are_sent_directly_once_per_transition() {
     harness.settle().await;
 
     let bodies = harness.backend.bodies();
-    // 只帶密鑰、workspace 名稱、狀態與 pane id(後台多一個欄位就回 400)。
+    // 只帶密鑰、workspace 名稱、狀態、pane id 與 tab(後台多一個欄位就回 400)。
+    // recorded snapshot 的 Tab 名稱是 herdr 預設的順序號(`3`),不算 Tab label → tab 用 Agent 名稱。
     assert!(
-        bodies.contains(&json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "blocked", "pane": "w1:pB"})),
+        bodies.contains(&json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "blocked", "pane": "w1:pB", "tab": "claude"})),
         "{bodies:?}"
     );
     assert_eq!(harness.sent(PHONE_KEY, "blocked", "w1:pB"), 1, "{bodies:?}");
@@ -576,12 +577,113 @@ async fn update_muted_reply_has_no_direct_push() {
 
 // MARK: - 執行
 
+// MARK: - tab 欄位(raychiutw/purrdr.host#74)
+
+/// recorded snapshot 裡 w1:pB 所在 Tab 的名稱與 Agent 名稱改成指定的值(`None` 是移除欄位)。
+fn snapshot_with_tab(label: Option<&str>, agent: Option<&str>) -> Value {
+    let mut snapshot = recorded("session.snapshot.ndjson");
+    let body = &mut snapshot["result"]["snapshot"];
+    let tab = body["tabs"].as_array_mut().unwrap().iter_mut().find(|tab| tab["tab_id"] == "w1:tB").unwrap();
+    match label {
+        Some(label) => tab["label"] = json!(label),
+        None => {
+            tab.as_object_mut().unwrap().remove("label");
+        }
+    }
+    let pane = body["agents"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|agent| agent["pane_id"] == "w1:pB")
+        .unwrap();
+    match agent {
+        Some(agent) => pane["agent"] = json!(agent),
+        None => {
+            pane.as_object_mut().unwrap().remove("agent");
+        }
+    }
+    snapshot
+}
+
+/// 這個 snapshot 下 w1:pB 轉成 blocked 時送出的本文(收到第一則)。
+async fn blocked_body_with(snapshot: Value) -> Value {
+    let harness = Harness::start(None).await;
+    harness.wait_for_lease().await;
+    harness.herdr.set_reply("session.snapshot", snapshot);
+    harness.event("w1:pB", "blocked");
+    wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pB") == 1, "等不到 blocked").await;
+    harness.bodies("blocked").into_iter().find(|body| body["key"] == PHONE_KEY).unwrap()
+}
+
+/// 有 Tab label:`tab` 用它;終端機標題(對話內容)不會跟著送出。
+async fn the_tab_label_is_sent_when_the_tab_has_one() {
+    let body = blocked_body_with(snapshot_with_tab(Some("後台 API"), Some("claude"))).await;
+    assert_eq!(
+        body,
+        json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "blocked", "pane": "w1:pB", "tab": "後台 API"})
+    );
+}
+
+/// 沒有 Tab label(沒有欄位、空字串,或 herdr 預設的順序號):用該 Pane 的 Agent 名稱。
+async fn without_a_tab_label_the_agent_name_is_sent() {
+    for label in [None, Some(""), Some("3")] {
+        let body = blocked_body_with(snapshot_with_tab(label, Some("codex"))).await;
+        assert_eq!(body["tab"], "codex", "{label:?} {body}");
+    }
+}
+
+/// 150 個字元的 Agent 名稱。
+const LONG_AGENT: &str = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+
+/// 後台的 `tab` 最長 100 字元、全空白視同沒帶:前後空白去掉、以字元計截斷(不切壞 UTF-8)、空白 label 改用 Agent 名稱。
+async fn the_tab_is_trimmed_and_cut_to_100_characters() {
+    let cases = [
+        (Some("天".repeat(150)), Some("claude"), Some("天".repeat(100))),
+        (Some("天".repeat(100)), Some("claude"), Some("天".repeat(100))),
+        (Some("é🙂".repeat(80)), Some("claude"), Some("é🙂".repeat(50))),
+        (Some("  後台 API \t".to_owned()), Some("claude"), Some("後台 API".to_owned())),
+        (Some("   ".to_owned()), Some("claude"), Some("claude".to_owned())),
+        (None, Some("  codex "), Some("codex".to_owned())),
+        (None, Some(LONG_AGENT), Some("x".repeat(100))),
+        (Some(format!("{} tail", "a".repeat(99))), Some("claude"), Some("a".repeat(99))),
+        (None, Some("   "), None),
+    ];
+    for (label, agent, expected) in cases {
+        let body = blocked_body_with(snapshot_with_tab(label.as_deref(), agent)).await;
+        assert_eq!(body.get("tab").and_then(Value::as_str).map(str::to_owned), expected, "{label:?} {agent:?}");
+    }
+}
+
+/// Tab label 與 Agent 名稱都沒有:省略 `tab`(其餘欄位照送)。
+async fn the_tab_is_omitted_without_a_label_and_an_agent() {
+    for agent in [None, Some("")] {
+        let body = blocked_body_with(snapshot_with_tab(None, agent)).await;
+        assert_eq!(
+            body,
+            json!({"key": PHONE_KEY, "workspace": "garden-journal", "status": "blocked", "pane": "w1:pB"}),
+            "{agent:?}"
+        );
+    }
+}
+
 type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
 
 fn tests() -> Vec<TestCase> {
     vec![
         ("blocked_and_done_are_sent_directly_once_per_transition", || {
             Box::pin(blocked_and_done_are_sent_directly_once_per_transition())
+        }),
+        ("the_tab_label_is_sent_when_the_tab_has_one", || {
+            Box::pin(the_tab_label_is_sent_when_the_tab_has_one())
+        }),
+        ("without_a_tab_label_the_agent_name_is_sent", || {
+            Box::pin(without_a_tab_label_the_agent_name_is_sent())
+        }),
+        ("the_tab_is_trimmed_and_cut_to_100_characters", || {
+            Box::pin(the_tab_is_trimmed_and_cut_to_100_characters())
+        }),
+        ("the_tab_is_omitted_without_a_label_and_an_agent", || {
+            Box::pin(the_tab_is_omitted_without_a_label_and_an_agent())
         }),
         ("a_revoked_pairing_is_removed_when_sending_blocked", || {
             Box::pin(a_revoked_pairing_is_removed_when_sending_blocked())
