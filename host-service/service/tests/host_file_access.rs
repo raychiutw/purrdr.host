@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use purrdr_host_service::host_files::{FileAccessRules, Grant, agent_written_paths};
+use purrdr_host_service::host_files::{FileAccessRules, Grant, agent_written_paths, user_prompt_paths};
 use serde_json::Value;
 
 fn vectors() -> Value {
@@ -33,12 +33,14 @@ fn access_cases_match_the_app_and_the_ssh_scripts() {
         };
         let mentioned = case["mentioned"].as_bool().unwrap();
 
-        let grant = rules.grant(case["path"].as_str().unwrap(), || mentioned);
+        let prompted = case["promptMentioned"].as_bool().unwrap_or(false);
+
+        let grant = rules.grant(case["path"].as_str().unwrap(), || mentioned, || prompted);
 
         let expected_root = case["root"].as_str().map(PathBuf::from);
         match (case["expected"].as_str().unwrap(), grant) {
             ("allowed", Some(Grant::WorkingDirectory(root))) => assert_eq!(Some(root), expected_root, "{}", case["name"]),
-            ("allowed", Some(Grant::MentionedLocation)) => assert_eq!(expected_root, None, "{}", case["name"]),
+            ("allowed", Some(Grant::MentionedLocation | Grant::UserUpload)) => assert_eq!(expected_root, None, "{}", case["name"]),
             ("denied", None) => {}
             (expected, grant) => panic!("{}:預期 {expected},得到 {grant:?}", case["name"]),
         }
@@ -57,6 +59,15 @@ fn mention_cases_count_only_what_the_agent_wrote() {
             .collect();
         let path = case["path"].as_str().unwrap().to_owned();
         assert_eq!(written.contains(&path), case["mentioned"].as_bool().unwrap(), "{}:{written:?}", case["name"]);
+        if let Some(expected) = case["userPrompted"].as_bool() {
+            let prompted: Vec<String> = case["lines"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|line| user_prompt_paths(&serde_json::from_str(line.as_str().unwrap()).unwrap()))
+                .collect();
+            assert_eq!(prompted.contains(&path), expected, "{}:{prompted:?}", case["name"]);
+        }
     }
 }
 
