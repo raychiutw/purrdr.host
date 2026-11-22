@@ -4,10 +4,10 @@ use std::future::Future;
 use std::time::Duration;
 
 use crate::agent_activity::HerdrAgentActivity;
-use crate::push_plugin::PluginUpdater;
 use crate::herdr_socket::HerdrSocket;
 use crate::install::InstalledService;
 use crate::install::system::ProcessHostSystem;
+use crate::push_plugin::PluginUpdater;
 use crate::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, Updater};
 
 const MINUTE: Duration = Duration::from_secs(60);
