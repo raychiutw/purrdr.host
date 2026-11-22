@@ -60,10 +60,7 @@ fn install_message_says_purrdr_pair_in_a_new_terminal() {
 fn without_path_the_install_message_keeps_the_full_command() {
     let host = TestHost::new(InstallPlatform::Windows);
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
-    let options = purrdr_host_service::install::InstallOptions {
-        add_to_path: Some(false),
-        ..host.options(PORT)
-    };
+    let options = host.options_without_path(PORT);
 
     let message = installer.install(&options, |_| true).unwrap().to_string();
 

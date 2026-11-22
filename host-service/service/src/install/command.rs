@@ -4,6 +4,7 @@ use std::io::{BufRead, Write};
 use std::process::ExitCode;
 
 use super::location::InstalledService;
+use super::settings::{RequestedSettings, assume_yes};
 use super::system::ProcessHostSystem;
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
 use crate::herdr_socket::SocketEnvironment;
@@ -36,22 +37,23 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
     let rerun = rerun_install_command(&rerun_prefix, &command, environment.platform);
     let mut installer = Installer::new(environment, ProcessHostSystem);
     match command {
-        InstallCommand::Install {
-            port,
-            herdr_session,
-            https_port,
-            assume_yes,
-            no_auto_update,
-            no_path,
-        } => {
-            let options = InstallOptions {
-                port,
-                herdr_session,
-                https_port,
-                auto_update: no_auto_update.then_some(false),
-                add_to_path: no_path.then_some(false),
-                source_directory,
+        InstallCommand::Install { .. } => {
+            let environment = |name: &str| std::env::var(name).ok();
+            let requested = match RequestedSettings::resolve(&command, environment) {
+                Ok(requested) => requested,
+                Err(error) => {
+                    eprintln!("{}", error.explain(&rerun));
+                    return ExitCode::FAILURE;
+                }
             };
+            let assume_yes = match assume_yes(&command, environment) {
+                Ok(assume_yes) => assume_yes,
+                Err(error) => {
+                    eprintln!("{}", error.explain(&rerun));
+                    return ExitCode::FAILURE;
+                }
+            };
+            let options = InstallOptions { requested, source_directory };
             let confirm = |question: &InstallQuestion| {
                 println!("{question}");
                 let prompt = match question {

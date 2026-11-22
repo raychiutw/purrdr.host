@@ -14,34 +14,34 @@ fn install_subcommands_are_parsed() {
     assert_eq!(
         InstallCommand::parse(&arguments("install")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: false,
-            no_path: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --port 47999 --session work --yes")),
         Some(Ok(InstallCommand::Install {
-            port: 47_999,
+            port: Some(47_999),
             herdr_session: Some("work".into()),
             https_port: None,
             assume_yes: true,
-            no_auto_update: false,
-            no_path: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --https-port 8443")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: Some(8443),
             assume_yes: false,
-            no_auto_update: false,
-            no_path: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(InstallCommand::parse(&arguments("uninstall")), Some(Ok(InstallCommand::Uninstall)));
@@ -70,23 +70,34 @@ fn install_subcommands_are_parsed() {
     assert_eq!(
         InstallCommand::parse(&arguments("install --no-auto-update")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: true,
-            no_path: false,
+            auto_update: Some(false),
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --no-path")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: false,
-            no_path: true,
+            auto_update: None,
+            add_to_path: Some(false),
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("install --auto-update --path")),
+        Some(Ok(InstallCommand::Install {
+            port: None,
+            herdr_session: None,
+            https_port: None,
+            assume_yes: false,
+            auto_update: Some(true),
+            add_to_path: Some(true),
         }))
     );
     assert_eq!(
@@ -111,6 +122,8 @@ fn other_arguments_are_left_to_the_service_or_rejected() {
         "install --https-port",
         "install --https-port 0",
         "install --https-port https",
+        "install --auto-update --no-auto-update",
+        "install --no-path --path",
         "uninstall --force",
         "status extra",
         "update --force",

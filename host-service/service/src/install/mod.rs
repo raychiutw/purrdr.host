@@ -12,6 +12,7 @@ mod command;
 mod command_alias;
 mod herdr_shortcut;
 mod location;
+pub mod settings;
 pub mod system;
 mod tailscale;
 mod user_path;
@@ -158,15 +159,16 @@ impl HostEnvironment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallCommand {
     Install {
-        port: u16,
+        /// `--port`;沒指定時依 `PURRDR_PORT`、上次安裝、預設值。
+        port: Option<u16>,
         herdr_session: Option<String>,
-        /// `tailscale serve` 的 HTTPS 埠;沒指定時沿用上次安裝，或 443。
+        /// `tailscale serve` 的 HTTPS 埠;沒指定時依環境變數、上次安裝，或 443。
         https_port: Option<u16>,
         assume_yes: bool,
-        /// `--no-auto-update`:關閉自動更新。
-        no_auto_update: bool,
-        /// `--no-path`:不加進使用者 PATH。
-        no_path: bool,
+        /// `--auto-update`(`Some(true)`)／`--no-auto-update`(`Some(false)`)。
+        auto_update: Option<bool>,
+        /// `--path`(`Some(true)`)／`--no-path`(`Some(false)`)。
+        add_to_path: Option<bool>,
     },
     Uninstall,
     Status,
@@ -218,15 +220,23 @@ impl InstallCommand {
     }
 
     fn parse_install(options: &[String]) -> Result<Self, String> {
-        let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (crate::DEFAULT_PORT, None, None, false);
-        let (mut no_auto_update, mut no_path) = (false, false);
+        let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (None, None, None, false);
+        let (mut auto_update, mut add_to_path): (Option<bool>, Option<bool>) = (None, None);
+        // 成對開關互相矛盾時報錯，不靜默以後者為準。
+        let pair = |slot: &mut Option<bool>, value: bool, on: &str, off: &str| match *slot {
+            Some(earlier) if earlier != value => Err(format!("conflicting options: {on} and {off}")),
+            _ => {
+                *slot = Some(value);
+                Ok(())
+            }
+        };
         let mut remaining = options.iter();
         while let Some(option) = remaining.next() {
             let mut value = || remaining.next().ok_or_else(|| format!("{option} needs a value"));
             match option.as_str() {
                 "--port" => {
                     let text = value()?;
-                    port = text.parse().map_err(|_| format!("invalid port: {text}"))?;
+                    port = Some(text.parse().map_err(|_| format!("invalid port: {text}"))?);
                 }
                 "--https-port" => {
                     let text = value()?;
@@ -239,8 +249,10 @@ impl InstallCommand {
                 }
                 "--session" => herdr_session = Some(value()?.clone()),
                 "--yes" => assume_yes = true,
-                "--no-auto-update" => no_auto_update = true,
-                "--no-path" => no_path = true,
+                "--auto-update" => pair(&mut auto_update, true, "--auto-update", "--no-auto-update")?,
+                "--no-auto-update" => pair(&mut auto_update, false, "--auto-update", "--no-auto-update")?,
+                "--path" => pair(&mut add_to_path, true, "--path", "--no-path")?,
+                "--no-path" => pair(&mut add_to_path, false, "--path", "--no-path")?,
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
@@ -249,8 +261,8 @@ impl InstallCommand {
             herdr_session,
             https_port,
             assume_yes,
-            no_auto_update,
-            no_path,
+            auto_update,
+            add_to_path,
         })
     }
 }
@@ -258,14 +270,8 @@ impl InstallCommand {
 /// `install` 的選項。
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
-    pub port: u16,
-    pub herdr_session: Option<String>,
-    /// `--https-port`;`None` 時沿用上次安裝的埠，或 443。
-    pub https_port: Option<u16>,
-    /// `--no-auto-update` 時 `Some(false)`;`None` 時沿用上次安裝，或開啟。
-    pub auto_update: Option<bool>,
-    /// `--no-path` 時 `Some(false)`;`None` 時沿用上次安裝，或加進 PATH。
-    pub add_to_path: Option<bool>,
+    /// 參數或環境變數明確指定的設定;其餘沿用上次安裝，或用預設值。
+    pub requested: settings::RequestedSettings,
     /// 放下載的執行檔的資料夾。
     pub source_directory: PathBuf,
 }
@@ -306,6 +312,8 @@ pub struct Installed {
     pub pair_command: String,
     /// `bin/` 已加進使用者 PATH(`--no-path` 時 false)。
     pub added_to_path: bool,
+    /// 這次安裝最後採用的設定與各自的來源。
+    pub settings: settings::InstallSettings,
     /// 在 herdr 裡顯示配對 QR code 的快捷鍵;沒加(按鍵已被使用者占用)時是 None。
     pub herdr_shortcut: Option<String>,
     /// `bin/` 有指令別名 `purrdr`(raychiutw/purrdr.host#53)。
@@ -352,14 +360,14 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         herdr_session,
         https_port,
         assume_yes,
-        no_auto_update,
-        no_path,
+        auto_update,
+        add_to_path,
     } = command
     else {
         return prefix.to_owned();
     };
     let mut parts = vec![prefix.to_owned()];
-    if *port != crate::DEFAULT_PORT {
+    if let Some(port) = port {
         parts.push(format!("--port {port}"));
     }
     if let Some(session) = herdr_session {
@@ -368,11 +376,15 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
     if *assume_yes {
         parts.push("--yes".to_owned());
     }
-    if *no_auto_update {
-        parts.push("--no-auto-update".to_owned());
+    match auto_update {
+        Some(true) => parts.push("--auto-update".to_owned()),
+        Some(false) => parts.push("--no-auto-update".to_owned()),
+        None => {}
     }
-    if *no_path {
-        parts.push("--no-path".to_owned());
+    match add_to_path {
+        Some(true) => parts.push("--path".to_owned()),
+        Some(false) => parts.push("--no-path".to_owned()),
+        None => {}
     }
     if let Some(https_port) = https_port {
         parts.push(format!("{HTTPS_PORT_OPTION} {https_port}"));
@@ -596,6 +608,18 @@ struct InstallRecord {
     herdr_shortcut: herdr_shortcut::ShortcutChange,
 }
 
+impl InstallRecord {
+    fn settings_snapshot(&self) -> settings::PreviousSettings {
+        settings::PreviousSettings {
+            port: self.port,
+            https_port: self.https_port,
+            herdr_session: self.herdr_session.clone(),
+            auto_update: self.auto_update,
+            add_to_path: self.add_to_path,
+        }
+    }
+}
+
 fn enabled() -> bool {
     true
 }
@@ -652,22 +676,20 @@ impl<S: HostSystem> Installer<S> {
         let previous = self.read_record(&layout)?;
         let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
         let host_name = tailscale.host_name(&mut self.system)?;
-        let preferred = options
-            .https_port
-            .or(previous.as_ref().map(|record| record.https_port))
-            .unwrap_or(tailscale::DEFAULT_HTTPS_PORT);
-        let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, options.port, previous.as_ref())? {
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        let preferred = settings.https_port.value;
+        let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
             PortUse::Free => (preferred, false),
             PortUse::Ours { in_place } => (preferred, in_place),
             PortUse::Taken(handlers) => {
-                let available = self.first_free_https_port(&tailscale, preferred, options.port, previous.as_ref())?;
+                let available = self.first_free_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())?;
                 let taken = InstallError::ServePortTaken {
                     https_port: preferred,
                     handlers: handlers.clone(),
                     available,
                 };
                 // 使用者指定的埠不擅自換掉。
-                let Some(alternative) = available.filter(|_| options.https_port.is_none()) else {
+                let Some(alternative) = available.filter(|_| !settings.https_port.is_explicit()) else {
                     return Err(taken);
                 };
                 let question = InstallQuestion::UseAnotherHttpsPort {
@@ -678,6 +700,10 @@ impl<S: HostSystem> Installer<S> {
                 if !confirm(&question) {
                     return Err(taken);
                 }
+                settings.https_port = settings::Sourced {
+                    value: alternative,
+                    source: settings::Source::Default,
+                };
                 (alternative, false)
             }
         };
@@ -686,14 +712,14 @@ impl<S: HostSystem> Installer<S> {
         }
 
         let mut record = InstallRecord {
-            port: options.port,
-            herdr_session: options.herdr_session.clone(),
+            port: settings.port.value,
+            herdr_session: settings.herdr_session.value.clone(),
             https_port,
             https_address: tailscale::https_address(&host_name, https_port),
             serve_configured: previous.as_ref().is_some_and(|record| record.serve_configured),
             created_directories: previous.as_ref().map(|record| record.created_directories.clone()).unwrap_or_default(),
-            auto_update: options.auto_update.or(previous.as_ref().map(|record| record.auto_update)).unwrap_or(true),
-            add_to_path: options.add_to_path.or(previous.as_ref().map(|record| record.add_to_path)).unwrap_or(true),
+            auto_update: settings.auto_update.value,
+            add_to_path: settings.add_to_path.value,
             path: previous.as_ref().map(|record| record.path.clone()).unwrap_or_default(),
             herdr_shortcut: previous.as_ref().map(|record| record.herdr_shortcut.clone()).unwrap_or_default(),
         };
@@ -741,6 +767,7 @@ impl<S: HostSystem> Installer<S> {
             warnings,
             pair_command: format!("{} pair", shell_quoted(&layout.executable(), self.environment.platform)),
             added_to_path: record.add_to_path,
+            settings,
             herdr_shortcut,
             command_alias,
         })
@@ -806,7 +833,7 @@ impl<S: HostSystem> Installer<S> {
 
         if !serve_in_place {
             record.serve_configured = true;
-            tailscale.serve(&mut self.system, record.https_port, options.port)?;
+            tailscale.serve(&mut self.system, record.https_port, record.port)?;
         }
 
         if record.add_to_path {
