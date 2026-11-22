@@ -17,6 +17,7 @@ use tokio::task::JoinHandle;
 
 use crate::agent_push;
 use crate::attention::{Alert, AttentionDetector, REMINDER_AFTER, STUCK_AFTER};
+use crate::direct_push::DirectDelivery;
 use crate::herdr_client::{HerdrClient, HerdrSubscription};
 use crate::pane_guard::{self, GuardFailure};
 use crate::pane_screen;
@@ -239,8 +240,20 @@ fn new_item_id() -> Result<String, getrandom::Error> {
 
 /// 啟動常駐 task:訂閱 herdr 事件(斷線退避重連),依狀態轉換送出佇列，並定時檢查卡住與仍在等你。
 /// `home` 是推播配對(`~/.purrdr/push-*`)所在的家目錄;None 時不推播。
-pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: ObserverOptions, home: Option<PathBuf>) -> JoinHandle<()> {
+/// `direct` 不為 None 時，轉換成 blocked／done 也由主機服務直接推播(raychiutw/purrdr.host#48):
+/// 每個檢查週期(預設 30 秒)重新判斷能不能送(舊版外掛在就不送)並更新 lease,訂閱斷掉時收回 lease。
+pub(crate) fn spawn(
+    herdr: HerdrClient,
+    observer: AgentObserver,
+    options: ObserverOptions,
+    home: Option<PathBuf>,
+    direct: Option<DirectDelivery>,
+) -> JoinHandle<()> {
     tokio::spawn(async move {
+        // 上次異常結束可能留下還新鮮的 lease;先收回，確定能送了才重新宣告。
+        if let Some(direct) = &direct {
+            direct.release();
+        }
         let mut statuses: HashMap<String, String> = HashMap::new();
         let mut attention = AttentionDetector::new(options.stuck_after, options.reminder_after);
         let mut delay = options.reconnect_initial;
@@ -264,6 +277,10 @@ pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: Observ
                         send_next(&herdr, &observer, &pane_id).await;
                     }
                 }
+                let mut sending = match &direct {
+                    Some(direct) => direct.refresh().await,
+                    None => false,
+                };
                 let (mut events, reader) = read_events(subscription);
                 let mut checks = tokio::time::interval(options.screen_check_interval);
                 loop {
@@ -276,12 +293,29 @@ pub(crate) fn spawn(herdr: HerdrClient, observer: AgentObserver, options: Observ
                                 if previous.as_deref() == Some("working") && is_finished(&status) {
                                     send_next(&herdr, &observer, &pane_id).await;
                                 }
+                                // 只在「事件」上送、狀態有變才送;重連後的 snapshot 對帳不補送(斷線期間可能已由外掛接手)。
+                                if sending
+                                    && previous.as_deref() != Some(status.as_str())
+                                    && let Some(kind) = direct_status(&status)
+                                    && let Some(home) = home.as_deref()
+                                {
+                                    let (herdr, home, pane_id) = (herdr.clone(), home.to_owned(), pane_id.clone());
+                                    tokio::spawn(async move { push(&herdr, &home, &pane_id, kind).await });
+                                }
                             }
                         }
-                        _ = checks.tick() => check_attention(&herdr, &mut attention, home.as_deref()).await,
+                        _ = checks.tick() => {
+                            if let Some(direct) = &direct {
+                                sending = direct.refresh().await;
+                            }
+                            check_attention(&herdr, &mut attention, home.as_deref()).await;
+                        }
                     }
                 }
                 reader.abort();
+                if let Some(direct) = &direct {
+                    direct.release();
+                }
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(options.reconnect_maximum);
@@ -351,6 +385,15 @@ fn workspace_label(snapshot: &Value, pane_id: &str) -> Option<String> {
         .and_then(|workspace| workspace["label"].as_str())
         .filter(|label| !label.is_empty());
     Some(label.unwrap_or(workspace_id).to_owned())
+}
+
+/// 由主機服務直接推播的狀態(與主機外掛相同:需要你、完成)。
+fn direct_status(status: &str) -> Option<&'static str> {
+    match status {
+        "blocked" => Some("blocked"),
+        "done" => Some("done"),
+        _ => None,
+    }
 }
 
 /// Agent 做完了(working 之後變成這些狀態才送佇列)。
