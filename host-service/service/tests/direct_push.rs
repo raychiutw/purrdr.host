@@ -635,12 +635,18 @@ async fn without_a_tab_label_the_agent_name_is_sent() {
 /// 150 個字元的 Agent 名稱。
 const LONG_AGENT: &str = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
 
-/// 後台的 `tab` 最長 100 字元、全空白視同沒帶:前後空白去掉、以字元計截斷(不切壞 UTF-8)、空白 label 改用 Agent 名稱。
-async fn the_tab_is_trimmed_and_cut_to_100_characters() {
+/// 後台的 `tab` 最長 100 字元、全空白視同沒帶:前後空白去掉、以 UTF-16 單位計 100 截斷(不切開代理對)、截斷後再去尾端空白、空白 label 改用 Agent 名稱。
+async fn the_tab_is_trimmed_and_cut_to_100_utf16_units() {
     let cases = [
         (Some("天".repeat(150)), Some("claude"), Some("天".repeat(100))),
         (Some("天".repeat(100)), Some("claude"), Some("天".repeat(100))),
-        (Some("é🙂".repeat(80)), Some("claude"), Some("é🙂".repeat(50))),
+        // é 算 1 個單位、🙂 算 2 個:33 組是 99 個單位，再放 é 剛好 100。
+        (Some("é🙂".repeat(80)), Some("claude"), Some(format!("{}é", "é🙂".repeat(33)))),
+        // 🙂 跨過第 100 個單位:整個捨棄，不留半個代理對。
+        (Some(format!("{}🙂tail", "a".repeat(99))), Some("claude"), Some("a".repeat(99))),
+        (Some(format!("{}🙂", "a".repeat(98))), Some("claude"), Some(format!("{}🙂", "a".repeat(98)))),
+        // 截斷後尾端剩空白要再去掉。
+        (Some(format!("{} 🙂tail", "a".repeat(98))), Some("claude"), Some("a".repeat(98))),
         (Some("  後台 API \t".to_owned()), Some("claude"), Some("後台 API".to_owned())),
         (Some("   ".to_owned()), Some("claude"), Some("claude".to_owned())),
         (None, Some("  codex "), Some("codex".to_owned())),
@@ -679,8 +685,8 @@ fn tests() -> Vec<TestCase> {
         ("without_a_tab_label_the_agent_name_is_sent", || {
             Box::pin(without_a_tab_label_the_agent_name_is_sent())
         }),
-        ("the_tab_is_trimmed_and_cut_to_100_characters", || {
-            Box::pin(the_tab_is_trimmed_and_cut_to_100_characters())
+        ("the_tab_is_trimmed_and_cut_to_100_utf16_units", || {
+            Box::pin(the_tab_is_trimmed_and_cut_to_100_utf16_units())
         }),
         ("the_tab_is_omitted_without_a_label_and_an_agent", || {
             Box::pin(the_tab_is_omitted_without_a_label_and_an_agent())

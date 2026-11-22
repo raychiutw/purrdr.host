@@ -438,6 +438,7 @@ fn workspace_label(snapshot: &Value, pane_id: &str) -> Option<String> {
 
 /// 推播的 `tab`(與主機外掛相同):pane 所在 Tab 的名稱，沒有就用該 pane 的 Agent 名稱，都沒有就 None。
 /// herdr 沒命名的 Tab 預設叫順序號(`1`、`2`…),不是使用者取的名字，視為沒有。不取終端機標題(可能含對話內容)。
+/// 規則順序(`notify.sh`、`notify.ps1` 相同):修頭尾空白 → 最多 100 個 UTF-16 單位 → 不切開代理對 → 截斷後再修尾端空白。
 fn tab_name(snapshot: &Value, pane_id: &str) -> Option<String> {
     let snapshot = &snapshot["snapshot"];
     let agent = snapshot["agents"].as_array()?.iter().find(|agent| agent["pane_id"] == pane_id)?;
@@ -450,13 +451,24 @@ fn tab_name(snapshot: &Value, pane_id: &str) -> Option<String> {
         .map(str::trim)
         .filter(|label| !label.is_empty() && !label.bytes().all(|byte| byte.is_ascii_digit()));
     let name = label.or_else(|| agent["agent"].as_str().map(str::trim).filter(|name| !name.is_empty()))?;
-    // 後台的 tab 最長 100 字元(超過回 400):以字元計截斷，不切壞 UTF-8。
-    let name: String = name.chars().take(MAX_TAB_CHARACTERS).collect();
-    Some(name.trim_end().to_owned())
+    Some(cut_to_utf16_units(name, MAX_TAB_UTF16_UNITS).trim_end().to_owned())
 }
 
-/// 後台 `/v1/push` 的 `tab` 欄位長度上限(字元)。
-const MAX_TAB_CHARACTERS: usize = 100;
+/// 後台 `/v1/push` 的 `tab` 欄位長度上限:100 字元(超過回 400)。
+/// 以 UTF-16 單位計(JavaScript 的 `length`):不管後台怎麼數字元，單位數不超過 100 就一定不超過 100 字元。
+const MAX_TAB_UTF16_UNITS: usize = 100;
+
+/// 取最多 `limit` 個 UTF-16 單位的開頭:一個字元(如 emoji 的代理對佔 2 個單位)放不下就整個捨棄，不切開。
+fn cut_to_utf16_units(text: &str, limit: usize) -> &str {
+    let mut units = 0;
+    for (index, character) in text.char_indices() {
+        units += character.len_utf16();
+        if units > limit {
+            return &text[..index];
+        }
+    }
+    text
+}
 
 /// 由主機服務直接推播的狀態(與主機外掛相同:需要你、完成)。
 fn direct_status(status: &str) -> Option<&'static str> {
