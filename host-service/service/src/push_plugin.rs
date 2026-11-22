@@ -44,12 +44,21 @@ pub enum PluginUpdate {
     Updated,
 }
 
-/// 自動更新排程用:外掛有裝才更新(`herdr plugin update purrdr.push --yes`),失敗回 herdr 的訊息。
-pub async fn update_plugin(herdr: &HerdrCli) -> Result<PluginUpdate, String> {
-    PushPlugin::new(herdr.clone(), None)
-        .update_plugin()
-        .await
-        .map_err(|failure| failure.to_string())
+/// 自動更新排程用的外掛更新器。與服務本身共用同一把 serial 鎖(由 `PushPlugin::updater` 取得),
+/// 所以自動更新不會和 app 觸發的安裝／移除同時跑。
+#[derive(Debug, Clone)]
+pub struct PluginUpdater(PushPlugin);
+
+impl PluginUpdater {
+    /// 獨立的更新器(自己一把鎖)。只給沒有服務可共用的情況(測試);正式執行一律用服務的那份。
+    pub fn standalone(herdr: HerdrCli) -> Self {
+        PluginUpdater(PushPlugin::new(herdr, None))
+    }
+
+    /// 外掛有裝才更新(`herdr plugin update purrdr.push --yes`),失敗回 herdr 的訊息。
+    pub async fn update(&self) -> Result<PluginUpdate, String> {
+        self.0.update_plugin().await.map_err(|failure| failure.to_string())
+    }
 }
 
 /// Windows:不開 console 視窗(背景執行檔沒有 console)。
@@ -167,6 +176,11 @@ impl PushPlugin {
     pub fn with_observer(mut self, running: bool) -> Self {
         self.observer_running = running && self.home.is_some();
         self
+    }
+
+    /// 取得共用這份 serial 鎖的更新器。
+    pub fn updater(&self) -> PluginUpdater {
+        PluginUpdater(self.clone())
     }
 
     pub async fn status(&self, device_id: &str) -> Result<PushState, PushFailure> {
@@ -560,5 +574,21 @@ mod tests {
             !PushPlugin::new(herdr(), None).with_observer(true).observer_running,
             "沒有家目錄就沒有 lease，不能直接送"
         );
+    }
+
+    #[tokio::test]
+    async fn the_updater_waits_for_the_services_own_serial_lock() {
+        // 不存在的執行檔:鎖放開後 spawn 立刻失敗,不會碰到真的 herdr。
+        let missing = HerdrCli::at_path(PathBuf::from("/nonexistent/purrdr-test-herdr"), Vec::new());
+        let plugin = PushPlugin::new(missing, None);
+        let updater = plugin.updater();
+        let held = plugin.serial.lock().await;
+
+        let blocked = tokio::time::timeout(Duration::from_millis(200), updater.update()).await;
+        assert!(blocked.is_err(), "服務正在處理安裝／移除時，自動更新要等");
+
+        drop(held);
+        let finished = tokio::time::timeout(Duration::from_secs(5), updater.update()).await;
+        assert!(finished.is_ok(), "鎖放開後自動更新就能跑");
     }
 }

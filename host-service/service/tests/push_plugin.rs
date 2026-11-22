@@ -16,7 +16,7 @@ use std::pin::Pin;
 
 use install_support::push_backend::FakePushBackend;
 use purrdr_host_service::herdr_cli::HerdrCli;
-use purrdr_host_service::{PluginUpdate, update_push_plugin};
+use purrdr_host_service::{PluginUpdate, PluginUpdater};
 use serde_json::{Value, json};
 use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_with_herdr_cli_and_home};
 use tempfile::TempDir;
@@ -650,7 +650,7 @@ async fn updating_an_installed_plugin_runs_herdr_plugin_update() {
     let setup = UpdateSetup::new();
     setup.mark("installed");
 
-    let result = update_push_plugin(&setup.herdr).await;
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
 
     assert_eq!(result, Ok(PluginUpdate::Updated));
     assert!(setup.calls().contains(&"plugin update purrdr.push --yes".to_owned()), "{:?}", setup.calls());
@@ -659,7 +659,7 @@ async fn updating_an_installed_plugin_runs_herdr_plugin_update() {
 async fn updating_without_the_plugin_does_not_run_plugin_update() {
     let setup = UpdateSetup::new();
 
-    let result = update_push_plugin(&setup.herdr).await;
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
 
     assert_eq!(result, Ok(PluginUpdate::NotInstalled));
     assert!(
@@ -677,7 +677,7 @@ async fn a_failing_plugin_update_is_reported_with_herdrs_message() {
     setup.mark("installed");
     setup.mark("update-fails");
 
-    let result = update_push_plugin(&setup.herdr).await;
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
 
     assert_eq!(result, Err("git pull failed".to_owned()));
 }
@@ -687,7 +687,7 @@ async fn failing_to_list_plugins_is_a_failure_and_does_not_update() {
     setup.mark("installed");
     setup.mark("list-fails");
 
-    let result = update_push_plugin(&setup.herdr).await;
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
 
     assert_eq!(result, Err("herdr server is not running".to_owned()));
     assert!(!setup.calls().iter().any(|call| call.contains("plugin update")), "{:?}", setup.calls());
