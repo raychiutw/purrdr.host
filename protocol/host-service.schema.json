@@ -1348,7 +1348,7 @@
       "type": "object",
       "properties": {
         "kind": { "$ref": "#/$defs/PlanUsagePeriodKind" },
-        "used_percentage": { "type": "integer", "minimum": 0, "maximum": 100, "description": "已用比例，四捨五入到整數、夾在 0～100(app 也只顯示整數)。" },
+        "used_percentage": { "type": "number", "minimum": 0, "maximum": 100, "description": "已用比例(夾在 0～100,不四捨五入：app 依它算剩餘比例與進度條)。" },
         "resets_at": { "type": "string", "description": "RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。" }
       },
       "required": ["kind", "used_percentage"]

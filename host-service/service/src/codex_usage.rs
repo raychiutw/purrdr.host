@@ -11,6 +11,8 @@ use tokio::process::{ChildStdout, Command};
 
 use crate::protocol::{PlanUsagePeriod, PlanUsagePeriodKind};
 
+use ExchangeFailure::{AppServer, Ended};
+
 /// 整段交談的期限(app-server 啟動要載入設定)。
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// 沒登入 ChatGPT(或用 API key 登入)時錯誤訊息含這段(openai/codex `account_processor.rs`;同 app 的判斷)。
@@ -68,29 +70,42 @@ impl CodexCli {
     }
 }
 
-/// 依序找 PATH 與常見的安裝位置(自動啟動時 PATH 只有系統目錄):Homebrew、`/usr/local/bin`、
-/// `~/.local/bin`、npm 的全域位置;Windows 是 PATH 與 `%APPDATA%\npm` 的 `codex.exe`／`codex.cmd`。
+/// 依序找 PATH 與常見的安裝位置(自動啟動時 PATH 只有系統目錄)的 `codex`;Windows 是 `codex.exe`／`codex.cmd`。
 fn locate() -> Option<PathBuf> {
-    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
-    let mut directories: Vec<PathBuf> = variable("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
-    let (names, extra): (&[&str], Vec<PathBuf>) = if cfg!(windows) {
-        (
-            &["codex.exe", "codex.cmd"],
-            variable("APPDATA").map(|app_data| vec![Path::new(&app_data).join("npm")]).unwrap_or_default(),
-        )
-    } else {
-        let mut extra = vec![PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")];
-        if let Some(home) = variable("HOME") {
-            let home = Path::new(&home);
-            extra.extend([home.join(".local/bin"), home.join(".npm-global/bin"), home.join("bin")]);
-        }
-        (&["codex"], extra)
-    };
-    directories.extend(extra);
-    directories
+    let names: &[&str] = if cfg!(windows) { &["codex.exe", "codex.cmd"] } else { &["codex"] };
+    search_directories()
         .iter()
         .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
         .find(|candidate| candidate.is_file())
+}
+
+/// PATH 加上常見的安裝位置:Homebrew、`/usr/local/bin`、`~/.local/bin`、npm 的全域位置、`~/bin`;
+/// Windows 是 `%APPDATA%\npm`。
+fn search_directories() -> Vec<PathBuf> {
+    let variable = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
+    let mut directories: Vec<PathBuf> = variable("PATH").map(|path| std::env::split_paths(&path).collect()).unwrap_or_default();
+    if cfg!(windows) {
+        directories.extend(variable("APPDATA").map(|app_data| Path::new(&app_data).join("npm")));
+    } else {
+        directories.extend([PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")]);
+        if let Some(home) = variable("HOME") {
+            let home = Path::new(&home);
+            directories.extend([home.join(".local/bin"), home.join(".npm-global/bin"), home.join("bin")]);
+        }
+    }
+    directories
+}
+
+/// 子程序的 PATH:codex 所在的資料夾優先，再接 PATH 與常見的安裝位置。npm 裝的 codex 是 `#!/usr/bin/env node`,
+/// 背景服務的 PATH 只有系統目錄時也要找得到 node(app 經 SSH 時以 `HerdrCommand.pathPrefix` 補)。
+fn child_path(program: &Path) -> std::ffi::OsString {
+    let directories = program.parent().map(Path::to_path_buf).into_iter().chain(search_directories());
+    std::env::join_paths(directories).unwrap_or_default()
+}
+
+/// 結束子程序(npm 的 codex 是 node 再啟動原生的 app-server:最上層結束後管線關閉，底下的 app-server 跟著結束)。
+fn stop(child: &mut tokio::process::Child) {
+    let _ = child.start_kill();
 }
 
 /// 執行一次 `codex app-server`:`initialize` → `initialized` → `account/rateLimits/read`,讀到回應就結束子程序。
@@ -100,6 +115,7 @@ pub(crate) async fn read(cli: &CodexCli) -> Result<CodexUsage, CodexUsageFailure
     command
         .args(&cli.program_arguments)
         .arg("app-server")
+        .env("PATH", child_path(&program))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -112,6 +128,7 @@ pub(crate) async fn read(cli: &CodexCli) -> Result<CodexUsage, CodexUsageFailure
     })?;
     let captured_at = humantime::format_rfc3339_seconds(SystemTime::now()).to_string();
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        stop(&mut child);
         return Err(CodexUsageFailure::Failed("cannot talk to codex app-server".to_owned()));
     };
     let exchange = async {
@@ -127,16 +144,10 @@ pub(crate) async fn read(cli: &CodexCli) -> Result<CodexUsage, CodexUsageFailure
         result_for(&mut lines, 1).await
     };
     let outcome = tokio::time::timeout(TIMEOUT, exchange).await;
-    let _ = child.start_kill();
+    stop(&mut child);
     let result = match outcome {
         Ok(Ok(result)) => result,
-        Ok(Err(Ended)) => {
-            let status = tokio::time::timeout(Duration::from_secs(2), child.wait()).await;
-            return Err(match status {
-                Ok(Ok(status)) if status.code() == Some(127) => CodexUsageFailure::NotFound,
-                _ => CodexUsageFailure::Failed("codex app-server ended without an answer".to_owned()),
-            });
-        }
+        Ok(Err(Ended)) => return Err(CodexUsageFailure::Failed("codex app-server ended without an answer".to_owned())),
         Ok(Err(AppServer(failure))) => return Err(failure),
         Err(_) => return Err(CodexUsageFailure::Failed("codex app-server did not answer in time".to_owned())),
     };
@@ -150,10 +161,9 @@ pub(crate) async fn read(cli: &CodexCli) -> Result<CodexUsage, CodexUsageFailure
 enum ExchangeFailure {
     /// 子程序結束或關閉了輸出。
     Ended,
-    /// app-server 回報錯誤，或寫不進去。
+    /// app-server 回報錯誤。
     AppServer(CodexUsageFailure),
 }
-use ExchangeFailure::{AppServer, Ended};
 
 /// 一行一則 JSON-RPC(不帶 jsonrpc 欄位,同 codex app-server 的 stdio)。
 async fn send(stdin: &mut tokio::process::ChildStdin, messages: &[Value]) -> Result<(), ExchangeFailure> {
@@ -166,7 +176,8 @@ async fn send(stdin: &mut tokio::process::ChildStdin, messages: &[Value]) -> Res
 async fn result_for(lines: &mut Lines<BufReader<ChildStdout>>, id: i64) -> Result<Value, ExchangeFailure> {
     while let Some(line) = lines.next_line().await.map_err(|_| Ended)? {
         let Ok(message) = serde_json::from_str::<Value>(&line) else { continue };
-        if message["id"].as_i64() != Some(id) {
+        // 只收回應：通知與 app-server 發出的請求(帶 method,id 可能相同)略過。
+        if message.get("method").is_some() || message["id"].as_i64() != Some(id) {
             continue;
         }
         if let Some(error) = message.get("error") {
@@ -200,11 +211,13 @@ fn periods(result: &Value) -> Option<Vec<PlanUsagePeriod>> {
             continue;
         }
         let resets_at = period["resetsAt"]
-            .as_u64()
-            .map(|seconds| humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(seconds)).to_string());
+            .as_f64()
+            .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+            .and_then(|seconds| UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64)))
+            .map(|time| humantime::format_rfc3339_seconds(time).to_string());
         periods.push(PlanUsagePeriod {
             kind,
-            used_percentage: used.clamp(0.0, 100.0).round() as i64,
+            used_percentage: used.clamp(0.0, 100.0),
             resets_at,
         });
     }

@@ -28,6 +28,7 @@ fn fake_codex(arguments: &[String]) -> i32 {
     if scenario.trim() == "exit" {
         return 3;
     }
+    std::fs::write(directory.join("path"), std::env::var("PATH").unwrap_or_default()).unwrap();
     let mut received = std::fs::OpenOptions::new().create(true).append(true).open(directory.join("received")).unwrap();
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
@@ -38,8 +39,9 @@ fn fake_codex(arguments: &[String]) -> i32 {
         let reply = match (message["method"].as_str(), message["id"].as_i64()) {
             (Some("initialize"), Some(id)) => json!({"id": id, "result": {"userAgent": "codex/0.1"}}),
             (Some("account/rateLimits/read"), Some(id)) => {
-                // 回應前先送一則通知：主機服務要略過不是這個 id 的訊息。
+                // 回應前先送一則通知，與一則 id 相同的 app-server 請求：主機服務只收回應。
                 writeln!(out, "{}", json!({"method": "account/updated", "params": {}})).unwrap();
+                writeln!(out, "{}", json!({"method": "item/tool/requestUserInput", "id": id, "params": {}})).unwrap();
                 rate_limits_reply(scenario.trim(), id)
             }
             _ => continue,
@@ -65,6 +67,10 @@ fn rate_limits_reply(scenario: &str, id: i64) -> Value {
         "single" => json!({"id": id, "result": {"rateLimits": {
             "primary": {"usedPercent": 150.0},
             "secondary": {"usedPercent": -3.0, "windowDurationMins": 10080, "resetsAt": 1_795_000_000}
+        }}}),
+        "remap" => json!({"id": id, "result": {"rateLimits": {
+            "primary": {"usedPercent": 70.0, "windowDurationMins": 10080, "resetsAt": 1_795_000_000.6},
+            "secondary": {"usedPercent": 5.0, "windowDurationMins": 10080}
         }}}),
         "not-signed-in" => json!({"id": id, "error": {"code": -32600, "message": "authentication required to read rate limits"}}),
         "fails" => json!({"id": id, "error": {"code": -32603, "message": "upstream timeout"}}),
@@ -120,7 +126,7 @@ fn is_rfc3339_seconds(text: &str) -> bool {
 
 // MARK: - 測試
 
-async fn reads_the_codex_bucket_and_rounds_percentages() {
+async fn reads_the_codex_bucket() {
     let harness = Harness::start("buckets").await;
 
     let reply = harness.request().await;
@@ -131,8 +137,8 @@ async fn reads_the_codex_bucket_and_rounds_percentages() {
     assert_eq!(
         reply["periods"],
         json!([
-            {"kind": "five_hour", "used_percentage": 42, "resets_at": "2026-11-18T11:06:40Z"},
-            {"kind": "week", "used_percentage": 13}
+            {"kind": "five_hour", "used_percentage": 42.4, "resets_at": "2026-11-18T11:06:40Z"},
+            {"kind": "week", "used_percentage": 12.6}
         ])
     );
     assert_eq!(harness.received_methods(), ["initialize", "initialized", "account/rateLimits/read"]);
@@ -146,11 +152,35 @@ async fn without_buckets_reads_rate_limits_and_clamps_percentages() {
     assert_eq!(
         reply["periods"],
         json!([
-            {"kind": "five_hour", "used_percentage": 100},
-            {"kind": "week", "used_percentage": 0, "resets_at": "2026-11-18T11:06:40Z"}
+            {"kind": "five_hour", "used_percentage": 100.0},
+            {"kind": "week", "used_percentage": 0.0, "resets_at": "2026-11-18T11:06:40Z"}
         ]),
         "{reply}"
     );
+}
+
+async fn window_length_decides_the_kind_and_duplicates_are_skipped() {
+    let harness = Harness::start("remap").await;
+
+    let reply = harness.request().await;
+
+    // primary 是一週長：算 week;secondary 也是 week,重複的略過。重置時間帶小數也收。
+    assert_eq!(
+        reply["periods"],
+        json!([{"kind": "week", "used_percentage": 70.0, "resets_at": "2026-11-18T11:06:40Z"}]),
+        "{reply}"
+    );
+}
+
+/// 背景服務的 PATH 只有系統目錄;npm 裝的 codex 是 `#!/usr/bin/env node`,要在 codex 所在的資料夾找得到 node。
+async fn codex_runs_with_its_own_folder_first_on_path() {
+    let harness = Harness::start("buckets").await;
+
+    harness.request().await;
+
+    let path = std::fs::read_to_string(harness.fake.path().join("path")).unwrap();
+    let first = std::env::split_paths(&path).next().unwrap();
+    assert_eq!(first, std::env::current_exe().unwrap().parent().unwrap(), "{path}");
 }
 
 async fn failures_have_their_own_error_codes() {
@@ -188,8 +218,12 @@ type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
 
 fn tests() -> Vec<TestCase> {
     vec![
-        ("reads_the_codex_bucket_and_rounds_percentages", || {
-            Box::pin(reads_the_codex_bucket_and_rounds_percentages())
+        ("reads_the_codex_bucket", || Box::pin(reads_the_codex_bucket())),
+        ("window_length_decides_the_kind_and_duplicates_are_skipped", || {
+            Box::pin(window_length_decides_the_kind_and_duplicates_are_skipped())
+        }),
+        ("codex_runs_with_its_own_folder_first_on_path", || {
+            Box::pin(codex_runs_with_its_own_folder_first_on_path())
         }),
         ("without_buckets_reads_rate_limits_and_clamps_percentages", || {
             Box::pin(without_buckets_reads_rate_limits_and_clamps_percentages())

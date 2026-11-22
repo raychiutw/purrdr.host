@@ -21,7 +21,7 @@ pub const MAXIMUM_FILE_SIZE: u64 = 26214400;
 pub const MAXIMUM_FILE_CHUNK: u64 = 1048576;
 
 /// app 送給主機服務的訊息，以 type 區分。標 x-write 的是寫入類操作，唯讀裝置送出時被拒絕(read_only_device)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ClientMessage {
     #[serde(rename = "hello")]
@@ -130,7 +130,7 @@ impl ClientMessage {
 }
 
 /// 主機服務送給 app 的訊息，以 type 區分。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ServerMessage {
     #[serde(rename = "welcome")]
@@ -238,7 +238,7 @@ pub enum ServerMessage {
 }
 
 /// 握手：連線後第一個請求，帶 app 使用的協定版本。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Hello {
     /// 請求識別碼，回應帶回同一個值。
     pub request_id: String,
@@ -249,7 +249,7 @@ pub struct Hello {
 }
 
 /// 握手成功：主機服務的協定版本、版本，herdr 伺服器 ping 回報的版本與能力，以及這支裝置是否唯讀。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Welcome {
     pub request_id: String,
     pub protocol_version: i64,
@@ -260,7 +260,7 @@ pub struct Welcome {
 }
 
 /// herdr 伺服器(不是 CLI)的版本與能力。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HerdrServer {
     pub version: String,
     pub protocol: i64,
@@ -269,27 +269,27 @@ pub struct HerdrServer {
 }
 
 /// 取得 Agent 列表(herdr session.snapshot)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentsList {
     pub request_id: String,
 }
 
 /// Agent 列表與它們所在的 workspace。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentsListResult {
     pub request_id: String,
     pub workspaces: Vec<Workspace>,
     pub agents: Vec<Agent>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Workspace {
     pub workspace_id: String,
     pub label: String,
 }
 
 /// herdr 在某個 Pane 偵測到的 Agent。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Agent {
     pub pane_id: String,
     pub workspace_id: String,
@@ -323,7 +323,7 @@ pub enum AgentStatus {
 }
 
 /// herdr 的 agent_session:定位對話紀錄用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentSession {
     pub source: String,
     pub agent: String,
@@ -332,7 +332,7 @@ pub struct AgentSession {
 }
 
 /// 對 Pane 送出按鍵(herdr pane.send_keys)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSendKeys {
     pub request_id: String,
     pub pane_id: String,
@@ -347,13 +347,13 @@ pub struct PaneSendKeys {
 }
 
 /// 按鍵已送到 Pane。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSendKeysResult {
     pub request_id: String,
 }
 
 /// 開 Pane 終端機(ADR-0005):主機服務以子行程執行 herdr terminal session control;唯讀裝置改用 observe(只能看)。串流識別碼就是這個請求的 request_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalOpen {
     pub request_id: String,
     /// pane id 或 terminal id。
@@ -366,7 +366,7 @@ pub struct PaneTerminalOpen {
 }
 
 /// Pane 終端機已開啟;畫面更新接著以 pane.terminal.frame 送出，結束時送 pane.terminal.closed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalOpenResult {
     pub request_id: String,
     /// 等於開啟請求的 request_id。
@@ -376,7 +376,7 @@ pub struct PaneTerminalOpenResult {
 }
 
 /// 一次畫面更新:herdr terminal.frame 原樣轉接。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalFrame {
     pub stream_id: String,
     /// 每條連線從 1 起算。
@@ -390,7 +390,7 @@ pub struct PaneTerminalFrame {
 }
 
 /// Pane 終端機結束，之後這個串流不再有訊息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalClosed {
     pub stream_id: String,
     pub ending: PaneTerminalEnding,
@@ -417,7 +417,7 @@ pub enum PaneTerminalEnding {
 }
 
 /// Pane 終端機的鍵盤輸入(herdr terminal.input)。不回應;稽核只在開啟時記一筆，不記內容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalInput {
     pub stream_id: String,
     /// 輸入 bytes 的標準 base64,每則不超過 64 KiB。
@@ -425,7 +425,7 @@ pub struct PaneTerminalInput {
 }
 
 /// 改變 viewport 格數(herdr terminal.resize)。不回應。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalResize {
     pub stream_id: String,
     pub columns: i64,
@@ -433,7 +433,7 @@ pub struct PaneTerminalResize {
 }
 
 /// 捲動(herdr terminal.scroll)。source 沒帶時是 wheel。不回應。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalScroll {
     pub stream_id: String,
     pub direction: TerminalScrollDirection,
@@ -463,13 +463,13 @@ pub enum TerminalScrollSource {
 }
 
 /// 關閉 Pane 終端機:control 關閉 stdin(等同 release),observe 結束子行程。不回應。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneTerminalClose {
     pub stream_id: String,
 }
 
 /// 定位對話紀錄(#59)。session 必須是 herdr snapshot 目前某個 Agent 的 agent_session;格式與 cwd 由主機服務從 snapshot 取得，app 不能指定路徑。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptLocate {
     pub request_id: String,
     pub session: SessionReference,
@@ -478,7 +478,7 @@ pub struct TranscriptLocate {
 }
 
 /// herdr agent_session 的 kind 與 value。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionReference {
     /// id 或 path。
     pub kind: String,
@@ -486,7 +486,7 @@ pub struct SessionReference {
 }
 
 /// 對話紀錄的路徑與大小(byte)。之後這條連線才能以這個路徑讀視窗與追蹤。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptLocateResult {
     pub request_id: String,
     pub path: String,
@@ -497,7 +497,7 @@ pub struct TranscriptLocateResult {
 }
 
 /// 讀以 end 為終點的最後 lines 行完整的行(開啟與往上翻頁)。path 必須是這條連線定位過的。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptWindow {
     pub request_id: String,
     pub path: String,
@@ -509,7 +509,7 @@ pub struct TranscriptWindow {
 }
 
 /// 視窗的 byte 範圍與範圍內的行。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptWindowResult {
     pub request_id: String,
     pub start: i64,
@@ -518,14 +518,14 @@ pub struct TranscriptWindowResult {
 }
 
 /// 對話紀錄的一行：原始 byte 長度(不含換行)與剝除圖片後的內容(行為規格 R-B04、R-B06)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptRecord {
     pub length: i64,
     pub text: String,
 }
 
 /// 開始追蹤對話紀錄尾端：從 from 起，主機服務把新增的完整行(每則最多 limit bytes,落後很多時分段接著送)以 transcript.update 推送，直到 transcript.unfollow、追蹤結束或連線關閉。stream_id 由 app 指定，同一條連線內不可重複。path 必須是這條連線定位過的。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptFollow {
     pub request_id: String,
     pub stream_id: String,
@@ -536,7 +536,7 @@ pub struct TranscriptFollow {
 }
 
 /// 追蹤開始，帶目前的大小與 from 之後已有的完整行;ended 有值時主機服務沒有開始追蹤。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptFollowResult {
     pub request_id: String,
     pub stream_id: String,
@@ -549,7 +549,7 @@ pub struct TranscriptFollowResult {
 }
 
 /// 追蹤中的對話紀錄有了新的完整行，或追蹤結束(ended)。主機服務主動推送，沒有 request_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptUpdate {
     pub stream_id: String,
     pub size: i64,
@@ -576,27 +576,27 @@ pub enum TranscriptStreamEnd {
 }
 
 /// 停止追蹤(對話關閉)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptUnfollow {
     pub request_id: String,
     pub stream_id: String,
 }
 
 /// 已停止追蹤;之後不再推送這個 stream_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptUnfollowResult {
     pub request_id: String,
 }
 
 /// 列表預覽(raychiutw/purrdr.host#17):一次讀多個對話紀錄的檔尾。path 必須是這條連線定位過的，任一個不是就整個請求回 transcript_not_allowed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptPreviews {
     pub request_id: String,
     pub entries: Vec<TranscriptPreviewEntry>,
 }
 
 /// 一個要讀預覽的對話紀錄。known_version 是上次這個主機服務回的 version(app 原樣帶回，不解讀)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptPreviewEntry {
     pub key: String,
     pub path: String,
@@ -605,14 +605,14 @@ pub struct TranscriptPreviewEntry {
 }
 
 /// 每個讀得到的對話紀錄一項(讀不到的不在結果裡，同 SSH 的預覽腳本)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptPreviewsResult {
     pub request_id: String,
     pub previews: Vec<TranscriptPreview>,
 }
 
 /// 一個對話紀錄的預覽。records 同其他對話紀錄讀取，每行是原始長度與剝除圖片後的內容:whole 是最後 48000 bytes(第一行可能被切在中間，長度從切點算起)、appended 是 known_version 之後附加的部分、unchanged 沒有內容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptPreview {
     pub key: String,
     pub change: TranscriptPreviewChange,
@@ -632,7 +632,7 @@ pub enum TranscriptPreviewChange {
 }
 
 /// 找呼叫 call_id 啟動的 subagent 對話紀錄(raychiutw/purrdr.host#17):在 path 的 session 資料夾的 subagents/ 下找 toolUseId 完全等於 call_id 的 agent-*.meta.json。path 必須是這條連線可讀的對話紀錄。沒有 meta 回 transcript_absent,不只一個回 transcript_ambiguous。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptSubagent {
     pub request_id: String,
     pub path: String,
@@ -640,14 +640,14 @@ pub struct TranscriptSubagent {
 }
 
 /// subagent 對話紀錄的路徑。session 資料夾 subagents/ 底下的 .jsonl 都可以讀視窗與追蹤。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptSubagentResult {
     pub request_id: String,
     pub path: String,
 }
 
 /// 讀 workflow 進度(raychiutw/purrdr.host#17):path 的 session 資料夾的 workflows/<run_id>.json(結束才寫)優先，否則 subagents/workflows/<run_id>/journal.jsonl。兩個都沒有回 transcript_absent。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptWorkflow {
     pub request_id: String,
     pub path: String,
@@ -658,7 +658,7 @@ pub struct TranscriptWorkflow {
 }
 
 /// kind 是讀到哪個檔(run 或 journal);content 是檔案原樣內容，checksum 等於 known_checksum 時省略。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptWorkflowResult {
     pub request_id: String,
     pub kind: TranscriptWorkflowKind,
@@ -677,7 +677,7 @@ pub enum TranscriptWorkflowKind {
 }
 
 /// 父對話紀錄中含 call_id 或 agent_id 的行(委派是否結束，raychiutw/purrdr.host#17)。path 必須是這條連線可讀的對話紀錄。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptDelegation {
     pub request_id: String,
     pub path: String,
@@ -690,7 +690,7 @@ pub struct TranscriptDelegation {
 }
 
 /// 這些行(剝除圖片後)的 checksum 與行;checksum 等於 known_checksum 時省略 records。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TranscriptDelegationResult {
     pub request_id: String,
     pub checksum: String,
@@ -699,7 +699,7 @@ pub struct TranscriptDelegationResult {
 }
 
 /// 對 Pane 送出文字(herdr pane.send_text),不補 Enter。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSendText {
     pub request_id: String,
     pub pane_id: String,
@@ -713,13 +713,13 @@ pub struct PaneSendText {
 }
 
 /// 文字已送到 Pane。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneSendTextResult {
     pub request_id: String,
 }
 
 /// 讀 Pane 畫面(herdr pane.read,raychiutw/purrdr.host#28)。主機服務只轉送並回傳文字與畫面指紋，不解析語意;pane_id 規則同 Pane 終端機的 target。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneRead {
     pub request_id: String,
     pub pane_id: String,
@@ -754,7 +754,7 @@ pub enum PaneReadFormat {
 }
 
 /// 畫面文字與指紋。screen 是 text 的 UTF-8 bytes 的 SHA-256(小寫 hex);以 source visible、format text 讀到的 screen 可作為 expected_screen。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneReadResult {
     pub request_id: String,
     pub text: String,
@@ -764,7 +764,7 @@ pub struct PaneReadResult {
 }
 
 /// 對 Agent 送出 prompt(herdr agent.prompt,target 是 pane_id)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentPrompt {
     pub request_id: String,
     pub pane_id: String,
@@ -780,14 +780,14 @@ pub struct AgentPrompt {
 }
 
 /// herdr agent.prompt 的 wait:等 Agent 進入其中一個狀態;主機服務等 herdr 的時間隨 timeout_ms 延長。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PromptWait {
     pub until: Vec<AgentStatus>,
     pub timeout_ms: i64,
 }
 
 /// herdr 收下 prompt。等待逾時、Agent 在等回答等情況以 herdr_error 回報(herdr_code 如 timeout、agent_blocked)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentPromptResult {
     pub request_id: String,
     /// herdr 回報的送達方式(例如 written_to_pty);沒有時省略。
@@ -796,7 +796,7 @@ pub struct AgentPromptResult {
 }
 
 /// 在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceCreate {
     pub request_id: String,
     /// 主機上的絕對路徑。
@@ -807,7 +807,7 @@ pub struct WorkspaceCreate {
 }
 
 /// workspace 已建立;聊天開在 root_pane_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceCreateResult {
     pub request_id: String,
     pub workspace_id: String,
@@ -815,7 +815,7 @@ pub struct WorkspaceCreateResult {
 }
 
 /// 重新命名 workspace(herdr workspace.rename)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRename {
     pub request_id: String,
     pub workspace_id: String,
@@ -824,7 +824,7 @@ pub struct WorkspaceRename {
 }
 
 /// 已重新命名。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceRenameResult {
     pub request_id: String,
     /// herdr 實際保存的名稱(可能經正規化);沒有時省略。
@@ -833,20 +833,20 @@ pub struct WorkspaceRenameResult {
 }
 
 /// 關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceClose {
     pub request_id: String,
     pub workspace_id: String,
 }
 
 /// 已關閉。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceCloseResult {
     pub request_id: String,
 }
 
 /// 以 workspace 所在的 git repo 建立 worktree 與分支，開成新的 workspace(herdr worktree.create,不搶桌機焦點)。分支已存在時 herdr 直接 checkout。不在 git repo 裡時以 herdr_error 回報(herdr_code not_git_worktree)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeCreate {
     pub request_id: String,
     /// 以這個 workspace 的 repo 為底。
@@ -856,7 +856,7 @@ pub struct WorktreeCreate {
 }
 
 /// worktree 已建立並開成新的 workspace;聊天開在 root_pane_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorktreeCreateResult {
     pub request_id: String,
     pub workspace_id: String,
@@ -864,7 +864,7 @@ pub struct WorktreeCreateResult {
 }
 
 /// 在 pane 的 shell 啟動 Agent(herdr agent.start)。新增聊天 = workspace.create 或 worktree.create 後對 root pane 送這個。不接受任意參數：只有 Claude Code 可帶 permission_mode(轉成 --permission-mode),Claude Code 與 Codex 可帶 resume_session。主機服務等 herdr 的時間隨 timeout_ms 延長;Agent 停在啟動問題、pane 不在 shell 提示字元等以 herdr_error 回報(herdr_code 如 agent_not_ready、agent_pane_busy、agent_name_taken)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentStart {
     pub request_id: String,
     pub pane_id: String,
@@ -898,13 +898,13 @@ pub enum ClaudePermissionMode {
 }
 
 /// Agent 已在 pane 啟動。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentStartResult {
     pub request_id: String,
 }
 
 /// 列出工作資料夾過去的 Claude／Codex session(raychiutw/purrdr.host#32),給續接用。Claude 讀 <設定目錄>/projects/<cwd 轉成的資料夾名>/*.jsonl;Codex 讀 sessions/ 下 session_meta 的 cwd 等於這個資料夾的 rollout。只回 id、最後修改時間與第一則使用者訊息的摘要，依修改時間新到舊，最多 50 筆。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionsList {
     pub request_id: String,
     /// 絕對路徑。
@@ -922,21 +922,21 @@ pub enum ResumableAgentKind {
 }
 
 /// 可續接的 session;資料夾不在時是空的。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionsListResult {
     pub request_id: String,
     pub sessions: Vec<HistorySession>,
 }
 
 /// 唯讀的 git 變更清單(raychiutw/purrdr.host#33):cwd 所在 repo 的工作目錄相對 HEAD 改了哪些檔案。cwd 必須是 herdr session.snapshot 當下回報的 Agent 工作目錄;以程序內函式庫讀取，不執行 git 或任何 filter 程式(所以不套用 clean／smudge 與換行轉換)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStatus {
     pub request_id: String,
     pub cwd: String,
 }
 
 /// 變更的檔案，依路徑排序。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitStatusResult {
     pub request_id: String,
     /// 目前分支的短名稱;detached HEAD 時省略。
@@ -946,7 +946,7 @@ pub struct GitStatusResult {
 }
 
 /// 一個變更的檔案;path 相對 repo 根目錄，以 / 分隔。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitFileChange {
     pub path: String,
     pub change: GitChangeKind,
@@ -966,7 +966,7 @@ pub enum GitChangeKind {
 }
 
 /// 唯讀的 git diff(工作目錄相對 HEAD 的 unified diff,前後 3 行)。cwd 規則同 git.status;帶 path 時只回這個檔案(必須是變更清單裡的路徑)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitDiff {
     pub request_id: String,
     pub cwd: String,
@@ -976,7 +976,7 @@ pub struct GitDiff {
 }
 
 /// 每個變更檔案的 diff。所有 diff 文字合計超過 x-maximum-file-size 時，之後的檔案只列路徑並標 truncated。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitDiffResult {
     pub request_id: String,
     pub files: Vec<GitFileDiff>,
@@ -984,7 +984,7 @@ pub struct GitDiffResult {
 }
 
 /// 一個檔案的 diff;沒有 diff 文字時 omitted 說明原因。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GitFileDiff {
     pub path: String,
     pub change: GitChangeKind,
@@ -1007,7 +1007,7 @@ pub enum GitDiffOmitted {
 }
 
 /// Send When Done 佇列(raychiutw/purrdr.host#30):主機服務的 Agent 觀察者在 Agent 從 working 變成 idle／done 時送出佇列的第一則(經 expected_session 比對)。帶 pane_id 時只回這個 pane。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueList {
     pub request_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1015,14 +1015,14 @@ pub struct QueueList {
 }
 
 /// 有排隊訊息的 pane 的佇列。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueListResult {
     pub request_id: String,
     pub queues: Vec<PaneQueue>,
 }
 
 /// 一個 pane 的佇列，依送出順序。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PaneQueue {
     pub pane_id: String,
     pub items: Vec<QueuedPrompt>,
@@ -1031,7 +1031,7 @@ pub struct PaneQueue {
 }
 
 /// 排隊的一則訊息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueuedPrompt {
     pub item_id: String,
     pub text: String,
@@ -1046,7 +1046,7 @@ pub enum QueuePause {
 }
 
 /// 排一則訊息到 pane 的佇列尾端;expected_session 必填(送出前比對，對象換了就不送)。每個 pane 最多 20 則(超過回 queue_full),每則最多 64 KiB(UTF-8)。佇列存在狀態資料夾，主機服務重啟後還在;稽核不記內容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueAdd {
     pub request_id: String,
     pub pane_id: String,
@@ -1055,14 +1055,14 @@ pub struct QueueAdd {
 }
 
 /// 已排入佇列。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueAddResult {
     pub request_id: String,
     pub item_id: String,
 }
 
 /// 從佇列刪除一則;不在佇列裡回 queue_item_unknown。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueRemove {
     pub request_id: String,
     pub pane_id: String,
@@ -1070,13 +1070,13 @@ pub struct QueueRemove {
 }
 
 /// 已刪除。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueRemoveResult {
     pub request_id: String,
 }
 
 /// 重排佇列:item_ids 必須恰好是目前佇列的所有 item_id(換順序);否則回 queue_item_unknown。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueReorder {
     pub request_id: String,
     pub pane_id: String,
@@ -1084,13 +1084,13 @@ pub struct QueueReorder {
 }
 
 /// 已重排。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueReorderResult {
     pub request_id: String,
 }
 
 /// 某個 pane 的佇列變了(新增、刪除、重排、送出或暫停),推給所有連線。sent_item_id:這次變更是因為這則已送出。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct QueueChanged {
     pub queue: PaneQueue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1098,7 +1098,7 @@ pub struct QueueChanged {
 }
 
 /// 一個過去的 session。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HistorySession {
     /// session id,可直接當 agent.start 的 resume_session。
     pub id: String,
@@ -1110,7 +1110,7 @@ pub struct HistorySession {
 }
 
 /// 開一條 Agent 事件串流(herdr events.subscribe)。herdr 接受後回 events.subscribe.result,之後以 events.event 推送，直到 events.ended 或 events.unsubscribe。事件只是「該重讀了」的訊號，對帳用 agents.list。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsSubscribe {
     pub request_id: String,
     /// 串流識別碼(app 自訂，同一條連線內不可重複);這條串流的訊息都帶它。
@@ -1119,7 +1119,7 @@ pub struct EventsSubscribe {
 }
 
 /// 一筆 herdr 事件訂閱。herdr 不認得的事件或不存在的 Pane 會讓整個訂閱被拒(herdr_error)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventSubscription {
     /// herdr 的訂閱型別，例如 pane.agent_status_changed、workspace.created。
     pub event: String,
@@ -1129,14 +1129,14 @@ pub struct EventSubscription {
 }
 
 /// herdr 接受了訂閱。此後的變化才會推送;之前的要靠 agents.list 對帳。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsSubscribeResult {
     pub request_id: String,
     pub stream_id: String,
 }
 
 /// herdr 推送的一個事件(沒有 request_id)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SubscribedEvent {
     pub stream_id: String,
     /// herdr 事件的 wire 名稱，例如 pane.agent_status_changed、workspace_closed。
@@ -1147,7 +1147,7 @@ pub struct SubscribedEvent {
 }
 
 /// 事件串流在主機端結束(沒有 request_id)。有 code 表示失敗;herdr 的 events_lost 是 code herdr_error 加 herdr_code events_lost,app 重新訂閱並對帳。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsEnded {
     pub stream_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1161,20 +1161,20 @@ pub struct EventsEnded {
 }
 
 /// 關閉一條事件串流，主機服務關掉對應的 herdr 訂閱。不認得的串流識別碼也回成功。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsUnsubscribe {
     pub request_id: String,
     pub stream_id: String,
 }
 
 /// 事件串流已關閉，之後不再有這條串流的訊息。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventsUnsubscribeResult {
     pub request_id: String,
 }
 
 /// 主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileStat {
     pub request_id: String,
     /// 主機上的絕對路徑(不可含 . 或 .. 段落)。
@@ -1182,7 +1182,7 @@ pub struct FileStat {
 }
 
 /// 檔案狀態。status 是 file 時帶版本(內容的 SHA-256)與大小;too_large 只帶大小。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileStatResult {
     pub request_id: String,
     pub status: FileStatus,
@@ -1210,7 +1210,7 @@ pub enum FileStatus {
 }
 
 /// 依版本讀 offset 起最多 length bytes(每次最多 1 MiB)。從頭讀(offset 0)或還沒有這個檔案的快照時，主機服務先檢查存取規則、把檔案讀成這條連線的快照並比對版本;之後的分塊從快照讀，分塊之間檔案被覆寫也不會拼出兩個版本。版本不符回 file_changed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileRead {
     pub request_id: String,
     pub path: String,
@@ -1221,7 +1221,7 @@ pub struct FileRead {
 }
 
 /// status 是 file 時帶 offset 與 bytes(標準 base64,超過檔尾時為空);其他狀態同 file.stat,不帶內容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileReadResult {
     pub request_id: String,
     pub status: FileStatus,
@@ -1235,7 +1235,7 @@ pub struct FileReadResult {
 }
 
 /// 推播外掛代裝(raychiutw/purrdr.ios#261,0.6.0 起):查 herdr 是否已安裝推播外掛(purrdr.push)、這支裝置在這台主機是否已有推播配對(~/.purrdr/push-<device_id>/pairing)、其他已配對裝置數。唯讀，唯讀裝置也可用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushStatus {
     pub request_id: String,
     /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -1243,7 +1243,7 @@ pub struct PushStatus {
 }
 
 /// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushInstall {
     pub request_id: String,
     /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -1252,7 +1252,7 @@ pub struct PushInstall {
 }
 
 /// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushRemove {
     pub request_id: String,
     /// app 的推播裝置 id(與 SSH 路徑相同):1–64 個小寫英數與 -,不能是 plugin。不合格回 invalid_message。
@@ -1260,7 +1260,7 @@ pub struct PushRemove {
 }
 
 /// 推播配對檔的內容(app 的 PushPairingFile):主機服務寫成 purrdr-push 1、endpoint=、key=、muted= 各一行。endpoint 必須是 https:// 開頭、不含空白與控制字元;key 是 64 位小寫 hex;muted 不能含控制字元。不合格回 invalid_message。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushPairing {
     /// 後台 /v1/push 的網址。
     pub endpoint: String,
@@ -1272,7 +1272,7 @@ pub struct PushPairing {
 }
 
 /// 這台主機的推播狀態。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushStatusResult {
     pub request_id: String,
     /// herdr 已安裝 purrdr.push(不論是誰裝的)。
@@ -1284,7 +1284,7 @@ pub struct PushStatusResult {
 }
 
 /// 開啟完成，帶完成後的推播狀態(欄位同 push.status.result)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushInstallResult {
     pub request_id: String,
     pub plugin_installed: bool,
@@ -1293,7 +1293,7 @@ pub struct PushInstallResult {
 }
 
 /// 關閉完成，帶完成後的推播狀態(欄位同 push.status.result)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushRemoveResult {
     pub request_id: String,
     pub plugin_installed: bool,
@@ -1302,7 +1302,7 @@ pub struct PushRemoveResult {
 }
 
 /// 同步這支裝置在這台主機的靜音清單(app 不保存配對密鑰，不能重送 push.install):只以原子方式改寫配對檔的 muted 行，保留 key 與 endpoint,不呼叫 herdr。沒有配對檔回 push_not_paired;muted 含控制字元或空字串回 invalid_message。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushUpdateMuted {
     pub request_id: String,
     /// 同 push.install 的 device_id。
@@ -1312,7 +1312,7 @@ pub struct PushUpdateMuted {
 }
 
 /// 靜音已更新。不問 herdr,plugin_installed 一律是 true(要確認外掛請用 push.status)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushUpdateMutedResult {
     pub request_id: String,
     pub plugin_installed: bool,
@@ -1321,7 +1321,7 @@ pub struct PushUpdateMutedResult {
 }
 
 /// 送一則測試通知給這支裝置(raychiutw/purrdr.host#60,0.11.0 起):讀這支裝置的推播配對，對它的 endpoint 送 {key, event: test, host_name?}(後台 raychiutw/purrdr.server#19 組固定內容的通知，不受推播種類偏好影響、不去重)。只送給這支裝置，不經過主機外掛與 herdr。沒有配對、後台回 404 或 410 都回 push_not_paired(410 時刪掉這組配對，期間重新配對的不刪);連不上或後台回其他狀態碼回 push_send_failed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushTest {
     pub request_id: String,
     /// 同 push.install 的 device_id。
@@ -1332,19 +1332,19 @@ pub struct PushTest {
 }
 
 /// 後台已接受測試通知(回 2xx)。實際送達由 APNs 決定。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushTestResult {
     pub request_id: String,
 }
 
 /// Codex 的方案用量(raychiutw/purrdr.host#62,0.12.0 起):主機服務以本機使用者身分執行一次 codex app-server,讀 account/rateLimits/read(同 app 經 SSH 的 CodexPlanUsageHost),讀到就結束子程序。唯讀，唯讀裝置也可用。找不到 codex 回 codex_not_found;沒以 ChatGPT 登入回 codex_not_signed_in;其他失敗回 codex_failed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCodex {
     pub request_id: String,
 }
 
 /// Codex 的方案用量。有多個 bucket 時用 Codex 本身的(codex)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UsageCodexResult {
     pub request_id: String,
     /// RFC 3339(UTC,到秒):主機服務讀取的時間。
@@ -1354,11 +1354,11 @@ pub struct UsageCodexResult {
 }
 
 /// 方案用量的一個週期。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanUsagePeriod {
     pub kind: PlanUsagePeriodKind,
-    /// 已用比例，四捨五入到整數、夾在 0～100(app 也只顯示整數)。
-    pub used_percentage: i64,
+    /// 已用比例(夾在 0～100,不四捨五入：app 依它算剩餘比例與進度條)。
+    pub used_percentage: f64,
     /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
@@ -1374,7 +1374,7 @@ pub enum PlanUsagePeriodKind {
 }
 
 /// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在系統暫存目錄底下的上傳資料夾(x-upload-folder)建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileUploadStart {
     /// 也是這次上傳的 upload_id。
     pub request_id: String,
@@ -1386,14 +1386,14 @@ pub struct FileUploadStart {
 }
 
 /// 上傳已開始，之後以 upload_id 送分塊。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileUploadStartResult {
     pub request_id: String,
     pub upload_id: String,
 }
 
 /// 依序送一塊內容(解碼後最多 x-maximum-file-chunk bytes,超過回 upload_too_large)。offset 必須等於已收到的 bytes,超過 size 或 upload_id 不是這條連線開始的都回 invalid_message,失敗後這次上傳作廢。收滿 size 時存成正式檔。連線結束時未完成的上傳刪掉。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileUploadChunk {
     pub request_id: String,
     pub upload_id: String,
@@ -1403,7 +1403,7 @@ pub struct FileUploadChunk {
 }
 
 /// 分塊已寫入。收滿 size 時帶 path:主機上的絕對路徑，app 放進 prompt。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileUploadChunkResult {
     pub request_id: String,
     pub upload_id: String,
@@ -1414,20 +1414,20 @@ pub struct FileUploadChunkResult {
 }
 
 /// 列出這台主機已配對的裝置(raychiutw/purrdr.host#19;不含已撤銷的)。唯讀，唯讀裝置也可用。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevicesList {
     pub request_id: String,
 }
 
 /// 已配對的裝置，依配對先後。不含權杖或其雜湊。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevicesListResult {
     pub request_id: String,
     pub devices: Vec<PairedDevice>,
 }
 
 /// 一支已配對的裝置。時間是 RFC 3339 UTC(到秒)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairedDevice {
     pub device_id: String,
     /// 配對時 app 給的裝置名稱。
@@ -1439,7 +1439,7 @@ pub struct PairedDevice {
 }
 
 /// 撤銷一支已配對的裝置：之後它的每個 WSS 訊息都以 device_token_revoked 與 close code 4401 拒絕。已撤銷的再撤銷一次也成功;不認得的 device_id 回 device_unknown;不能撤銷發出請求的這支裝置(回 invalid_message,撤銷自己用 POST /v1/revoke)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevicesRevoke {
     pub request_id: String,
     /// devices.list.result 裡的 device_id。
@@ -1447,20 +1447,20 @@ pub struct DevicesRevoke {
 }
 
 /// 已撤銷。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevicesRevokeResult {
     pub request_id: String,
     pub device_id: String,
 }
 
 /// 從 app 管理主機服務(raychiutw/purrdr.host#18):查已安裝版本、最新版本(問 Release 來源)、自動更新開關、上次檢查或更新的結果與退回過的版本。唯讀，唯讀裝置也可用。沒有安裝(開發中直接執行)時回 host_service_not_installed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceStatus {
     pub request_id: String,
 }
 
 /// 主機服務的更新狀態(同主機上的 update --check 與 version)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceStatusResult {
     pub request_id: String,
     /// 安裝好的執行檔回報的版本;更新後重啟前可能比 welcome 的 host_service_version 新。
@@ -1483,7 +1483,7 @@ pub struct HostServiceStatusResult {
 }
 
 /// 上一次檢查或更新的時間與結果(update.json)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceUpdateRecord {
     /// RFC 3339(UTC,到秒)。
     pub checked_at: String,
@@ -1492,13 +1492,13 @@ pub struct HostServiceUpdateRecord {
 }
 
 /// 立即更新：有更大的版本就以獨立程序執行安裝好的 update --yes(與主機上手動更新同一條流程：update.lock、核對 SHA256SUMS、起不來就換回),回應在重啟前送出。主機服務接著重啟、連線中斷，app 重新連線後以 welcome 的 host_service_version 確認結果，失敗退回時 host_service.status 看得到 rolled_back 與 last_update。已有更新在進行回 update_in_progress;取不到最新版本或啟動不了更新程序回 update_failed。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceUpdate {
     pub request_id: String,
 }
 
 /// started:更新程序已啟動，from_version → to_version;up_to_date:已是最新，沒有更新(不重啟)。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceUpdateResult {
     pub request_id: String,
     pub outcome: HostServiceUpdateOutcome,
@@ -1518,21 +1518,21 @@ pub enum HostServiceUpdateOutcome {
 }
 
 /// 開關背景自動更新(同主機上的 auto-update on|off,改安裝紀錄的 auto_update);背景服務下一次檢查時就照新的設定。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceSetAutoUpdate {
     pub request_id: String,
     pub enabled: bool,
 }
 
 /// 已改好，帶改完後的開關。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HostServiceSetAutoUpdateResult {
     pub request_id: String,
     pub auto_update: bool,
 }
 
 /// POST /v1/pair 的本文：以配對碼換裝置權杖。QR code 的內容是 purrdr://pair?address=<HTTPS 位址>&code=<配對碼>。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairRequest {
     /// 大小寫與連字號不拘，例如 K7QM-2XPA。
     pub pairing_code: String,
@@ -1541,7 +1541,7 @@ pub struct PairRequest {
 }
 
 /// 配對成功。device_token 只在這裡出現一次，主機只存雜湊。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairResponse {
     pub device_id: String,
     pub device_token: String,
@@ -1550,7 +1550,7 @@ pub struct PairResponse {
 }
 
 /// 請求失敗(WSS 訊息，也是配對與撤銷 HTTPS 請求失敗時的本文)。訊息本身無法解析時沒有 request_id。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ErrorMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,

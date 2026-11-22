@@ -2924,12 +2924,12 @@ extension HostServiceProtocol {
     /// 方案用量的一個週期。
     public struct PlanUsagePeriod: Codable, Sendable, Equatable {
         public var kind: PlanUsagePeriodKind
-        /// 已用比例，四捨五入到整數、夾在 0～100(app 也只顯示整數)。
-        public var usedPercentage: Int
+        /// 已用比例(夾在 0～100,不四捨五入：app 依它算剩餘比例與進度條)。
+        public var usedPercentage: Double
         /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。
         public var resetsAt: String?
 
-        public init(kind: PlanUsagePeriodKind, usedPercentage: Int, resetsAt: String? = nil) {
+        public init(kind: PlanUsagePeriodKind, usedPercentage: Double, resetsAt: String? = nil) {
             self.kind = kind
             self.usedPercentage = usedPercentage
             self.resetsAt = resetsAt
