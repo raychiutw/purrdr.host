@@ -10,6 +10,7 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 
+use purrdr_host_service::install::settings::{RequestedSettings, Source, Sourced};
 use purrdr_host_service::install::system::{CommandOutput, HostSystem};
 use purrdr_host_service::install::{HostEnvironment, InstallOptions, InstallPlatform};
 use serde_json::{Value, json};
@@ -120,21 +121,35 @@ impl TestHost {
 
     pub fn options(&self, port: u16) -> InstallOptions {
         InstallOptions {
-            port,
-            herdr_session: None,
-            https_port: None,
-            auto_update: None,
-            add_to_path: None,
+            requested: RequestedSettings {
+                port: Some(Sourced {
+                    value: port,
+                    source: Source::Argument,
+                }),
+                ..RequestedSettings::default()
+            },
             source_directory: self.downloads.0.clone(),
         }
     }
 
+    /// 指定 `--no-path` 的安裝選項。
+    pub fn options_without_path(&self, port: u16) -> InstallOptions {
+        let mut options = self.options(port);
+        options.requested.add_to_path = Some(Sourced {
+            value: false,
+            source: Source::Argument,
+        });
+        options
+    }
+
     /// 指定 `--https-port` 的安裝選項。
     pub fn options_on_https_port(&self, port: u16, https_port: u16) -> InstallOptions {
-        InstallOptions {
-            https_port: Some(https_port),
-            ..self.options(port)
-        }
+        let mut options = self.options(port);
+        options.requested.https_port = Some(Sourced {
+            value: https_port,
+            source: Source::Argument,
+        });
+        options
     }
 
     pub fn service_directory(&self) -> PathBuf {

@@ -6,7 +6,8 @@ use install_support::{FQDN, FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_U
 use std::time::SystemTime;
 
 use purrdr_host_service::herdr_socket::{Platform, SocketEnvironment};
-use purrdr_host_service::install::{InstallError, InstallOptions, InstallPlatform, InstallQuestion, Installer, SkippedHttpsPort};
+use purrdr_host_service::install::settings::{Source, Sourced};
+use purrdr_host_service::install::{InstallError, InstallPlatform, InstallQuestion, Installer, SkippedHttpsPort};
 use purrdr_host_service::management;
 use purrdr_host_service::state_directory::default_state_directory;
 
@@ -576,10 +577,11 @@ fn auto_update_is_on_by_default_off_with_the_option_and_kept_when_installing_aga
 
     installer.install(&host.options(PORT), |_| true).unwrap();
     let default = record(&host)["auto_update"].clone();
-    let without_auto_update = InstallOptions {
-        auto_update: Some(false),
-        ..host.options(PORT)
-    };
+    let mut without_auto_update = host.options(PORT);
+    without_auto_update.requested.auto_update = Some(Sourced {
+        value: false,
+        source: Source::Argument,
+    });
     installer.install(&without_auto_update, |_| true).unwrap();
     let with_option = record(&host)["auto_update"].clone();
     installer.install(&host.options(PORT), |_| true).unwrap();
