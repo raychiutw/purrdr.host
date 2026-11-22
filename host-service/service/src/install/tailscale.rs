@@ -10,10 +10,10 @@ use super::{InstallError, InstallPlatform};
 /// `tailscale serve` 預設的 HTTPS 埠。
 pub(super) const DEFAULT_HTTPS_PORT: u16 = 443;
 
-/// 預設埠被占用時依序改用的 HTTPS 埠。`tailscale serve --https` 可用任何埠
-/// (https://tailscale.com/kb/1242/tailscale-serve),這裡只挑 Funnel 也允許的 443、8443、10000
-/// (https://tailscale.com/kb/1223/funnel),日後開 Funnel 也不必換埠。
-pub(super) const CANDIDATE_HTTPS_PORTS: [u16; 3] = [443, 8443, 10_000];
+/// 建議 HTTPS 埠時依序檢查的候選埠。`tailscale serve --https` 可用任何埠
+/// (https://tailscale.com/kb/1242/tailscale-serve),這裡挑 Funnel 也允許的 443、8443、10000
+/// (https://tailscale.com/kb/1223/funnel),再加 9443、10443,多個服務並存時仍找得到空埠。
+pub(super) const CANDIDATE_HTTPS_PORTS: [u16; 5] = [443, 8443, 9443, 10_000, 10_443];
 
 /// 找到的 tailscale CLI。
 pub(super) struct Tailscale {
