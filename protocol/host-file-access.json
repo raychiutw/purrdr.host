@@ -3,14 +3,15 @@
   "environment": {
     "posix": {
       "home": "/home/demo",
-      "transcript": "/home/demo/.claude/projects/-home-demo-ledger/s1.jsonl"
+      "transcript": "/home/demo/.claude/projects/-home-demo-ledger/s1.jsonl",
+      "temporaryDirectory": "/private/var/folders/x1/T"
     },
     "windows": {
       "home": "C:\\Users\\Demo",
       "transcript": "C:\\Users\\Demo\\.claude\\projects\\C--Users-Demo-ledger\\s1.jsonl"
     }
   },
-  "accessDescription": "accessCases:path 是請求的路徑,workingDirectory 是 herdr 回報的 Agent 工作目錄,mentioned 表示路徑出現在對話紀錄中 Agent 自己寫出的地方。expected 只看路徑判斷(不碰檔案系統)。root 是 app 送給 SSH 取檔腳本的工作目錄(null 是 `-`,只因提到而放行),腳本收到後自己再判斷一次。only 列出適用的實作(app、host-service、posix、powershell),沒有就是全部。 promptMentioned(沒有就是 false)表示路徑出現在對話紀錄「使用者 prompt」裡(raychiutw/purrdr.ios#421):使用者 prompt 不算 Agent 寫出的路徑，但位在 Purrdr 上傳資料夾(暫存目錄底下名為 x-upload-folder 的資料夾,或舊版家目錄的 .purrdr/uploads)之下的路徑照樣放行;其他位置仍拒絕，排除清單與開檔後核對照舊。",
+  "accessDescription": "accessCases:path 是請求的路徑,workingDirectory 是 herdr 回報的 Agent 工作目錄,mentioned 表示路徑出現在對話紀錄中 Agent 自己寫出的地方。expected 只看路徑判斷(不碰檔案系統)。root 是 app 送給 SSH 取檔腳本的工作目錄(null 是 `-`,只因提到而放行),腳本收到後自己再判斷一次。only 列出適用的實作(app、host-service、posix、powershell),沒有就是全部。 environment.posix.temporaryDirectory 是主機的 TMPDIR(macOS 的 /var/folders/…/T 不在標準位置，靠它認得)。promptMentioned(沒有就是 false)表示路徑出現在對話紀錄「使用者 prompt」裡(raychiutw/purrdr.ios#421):使用者 prompt 不算 Agent 寫出的路徑，但位在 Purrdr 上傳資料夾(暫存位置的「直接子資料夾」,名稱是 x-upload-folder 加選用的 -<uid>;更深一層的同名資料夾不算;或舊版家目錄的 .purrdr/uploads)之下的路徑照樣放行;其他位置仍拒絕，排除清單與開檔後核對照舊。",
   "accessCases": [
     {
       "name": "工作目錄之下",
@@ -492,6 +493,36 @@
       "root": null
     },
     {
+      "name": "使用者 prompt 其他路徑拒絕:標準暫存目錄底下更深一層的同名資料夾",
+      "platform": "posix",
+      "path": "/tmp/work/purrdr-uploads-501/a1.jpg",
+      "workingDirectory": "/home/demo/ledger",
+      "mentioned": false,
+      "promptMentioned": true,
+      "expected": "denied",
+      "root": null
+    },
+    {
+      "name": "使用者 prompt 其他路徑拒絕:主機 TMPDIR 底下更深一層的同名資料夾",
+      "platform": "posix",
+      "path": "/private/var/folders/x1/T/work/purrdr-uploads-501/a1.jpg",
+      "workingDirectory": "/home/demo/ledger",
+      "mentioned": false,
+      "promptMentioned": true,
+      "expected": "denied",
+      "root": null
+    },
+    {
+      "name": "使用者上傳放行:上傳資料夾底下的子資料夾",
+      "platform": "posix",
+      "path": "/tmp/purrdr-uploads-501/batch/a1.jpg",
+      "workingDirectory": "/home/demo/ledger",
+      "mentioned": false,
+      "promptMentioned": true,
+      "expected": "allowed",
+      "root": null
+    },
+    {
       "name": "使用者上傳放行仍受排除清單限制",
       "platform": "posix",
       "path": "/tmp/purrdr-uploads-501/.env",
@@ -518,6 +549,16 @@
       "mentioned": false,
       "promptMentioned": true,
       "expected": "allowed",
+      "root": null
+    },
+    {
+      "name": "Windows:使用者 prompt 其他路徑拒絕:%TEMP% 底下更深一層的同名資料夾",
+      "platform": "windows",
+      "path": "C:\\Users\\Demo\\AppData\\Local\\Temp\\work\\purrdr-uploads\\a1.png",
+      "workingDirectory": "C:\\Users\\Demo\\ledger",
+      "mentioned": false,
+      "promptMentioned": true,
+      "expected": "denied",
       "root": null
     },
     {

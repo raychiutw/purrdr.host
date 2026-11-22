@@ -29,6 +29,7 @@ fn access_cases_match_the_app_and_the_ssh_scripts() {
             working_directories: case["workingDirectory"].as_str().map(PathBuf::from).into_iter().collect(),
             home: environment["home"].as_str().map(PathBuf::from),
             transcripts: vec![PathBuf::from(environment["transcript"].as_str().unwrap())],
+            temporary_directories: environment["temporaryDirectory"].as_str().map(PathBuf::from).into_iter().collect(),
             ..FileAccessRules::default()
         };
         let mentioned = case["mentioned"].as_bool().unwrap();

@@ -16,6 +16,7 @@ use sha2::{Digest, Sha256};
 use crate::host_path_mentions;
 use crate::protocol::{EXCLUDED_FILE_LOCATIONS, FileStatus, MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, TEMPORARY_FILE_LOCATIONS, UPLOAD_FOLDER};
 use crate::text_format::hex;
+use crate::uploads::legacy_upload_path;
 
 /// 路徑任何位置連續出現排除清單的段落(不分大小寫;`*` 結尾比對段落開頭)。
 pub fn is_excluded(path: &Path) -> bool {
@@ -94,7 +95,7 @@ impl FileAccessRules {
         if self.is_mentionable_location(path) && is_mentioned() {
             return Some(Grant::MentionedLocation);
         }
-        (self.is_upload_location(path, false) && is_prompted()).then_some(Grant::UserUpload)
+        (self.is_upload_location(path, PathForm::AsRequested) && is_prompted()).then_some(Grant::UserUpload)
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
@@ -125,7 +126,7 @@ impl FileAccessRules {
     fn mentionable_locations(&self) -> Vec<PathBuf> {
         let mut locations = self.temporary_locations();
         if let Some(home) = &self.home {
-            locations.push(home.join(".purrdr").join("uploads"));
+            locations.push(legacy_upload_path(home));
         }
         for transcript in &self.transcripts {
             if let (Some(folder), Some(stem)) = (transcript.parent(), transcript.file_stem()) {
@@ -135,20 +136,26 @@ impl FileAccessRules {
         locations
     }
 
-    /// Purrdr 上傳資料夾：暫存目錄底下名為 `purrdr-uploads`(Windows)或 `purrdr-uploads-<uid>`(Unix)的資料夾，
-    /// 以及相容期的舊版 `<家目錄>/.purrdr/uploads`。暫存目錄不在標準位置時(例如 macOS 的 `/var/folders/…/T`)也靠名稱認得，
-    /// 但名稱像上傳資料夾、卻不在暫存目錄底下的不算。`include_resolved` 時每個位置也比對解析 symlink 後的寫法。
-    fn is_upload_location(&self, path: &Path, include_resolved: bool) -> bool {
-        let matches_root = |root: &Path| is_under(path, root) || (include_resolved && resolve(root).is_some_and(|resolved| is_under(path, &resolved)));
-        let in_upload_folder = |root: &Path| {
-            matches_root(root)
-                && path.components().any(|component| match component {
-                    Component::Normal(segment) => is_upload_folder_name(&segment.to_string_lossy()),
-                    _ => false,
-                })
+    /// Purrdr 上傳資料夾:**暫存位置的直接子資料夾**,名為 `purrdr-uploads`(Windows)或 `purrdr-uploads-<uid>`(Unix),
+    /// 以及相容期的舊版 `<家目錄>/.purrdr/uploads`。暫存目錄不在標準位置時(例如 macOS 的 `/var/folders/…/T`)靠主機的
+    /// `TMPDIR` 認得。暫存位置底下更深一層的同名資料夾、名稱像上傳資料夾卻不在暫存位置的都不算
+    /// (Agent 可以在那裡放任意內容)。`form` 為 `AlsoResolved` 時每個位置也比對解析 symlink 後的寫法。
+    fn is_upload_location(&self, path: &Path, form: PathForm) -> bool {
+        let roots_of = |root: &Path| -> Vec<PathBuf> {
+            let resolved = (form == PathForm::AlsoResolved).then(|| resolve(root)).flatten();
+            std::iter::once(root.to_owned()).chain(resolved).collect()
         };
-        self.temporary_locations().iter().any(|root| in_upload_folder(root))
-            || self.home.as_ref().is_some_and(|home| matches_root(&home.join(".purrdr").join("uploads")))
+        let in_temporary_upload_folder = self
+            .temporary_locations()
+            .iter()
+            .flat_map(|root| roots_of(root))
+            .any(|root| is_in_direct_child_upload_folder(path, &root));
+        in_temporary_upload_folder
+            || self
+                .home
+                .as_deref()
+                .map(legacy_upload_path)
+                .is_some_and(|legacy| roots_of(&legacy).iter().any(|root| is_under(path, root)))
     }
 
     fn is_mentionable_location(&self, path: &Path) -> bool {
@@ -196,6 +203,25 @@ pub fn user_prompt_paths(line: &Value) -> Vec<String> {
         }
     }
     found
+}
+
+/// 比對路徑時用哪些寫法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathForm {
+    /// 只看請求的寫法。
+    AsRequested,
+    /// 也看解析 symlink 後的實際位置(開檔後核對用)。
+    AlsoResolved,
+}
+
+/// `path` 在 `temporary` 的直接子資料夾(名稱是上傳資料夾)之下:`<temporary>/purrdr-uploads…/<檔案>`。
+fn is_in_direct_child_upload_folder(path: &Path, temporary: &Path) -> bool {
+    let path_keys = comparison_keys(path);
+    let temporary_keys = comparison_keys(temporary);
+    !temporary_keys.is_empty()
+        && path_keys.len() > temporary_keys.len() + 1
+        && path_keys.starts_with(&temporary_keys)
+        && is_upload_folder_name(&path_keys[temporary_keys.len()])
 }
 
 /// `purrdr-uploads`(Windows)或 `purrdr-uploads-<uid>`(Unix)。
@@ -485,7 +511,7 @@ fn resolved_is_allowed(actual: &Path, grant: &Grant, resolved: &FileAccessRules)
     match grant {
         Grant::WorkingDirectory(root) => resolve(root).is_some_and(|actual_root| !resolved.is_too_broad(&actual_root) && is_under(actual, &actual_root)),
         Grant::MentionedLocation => resolved.is_resolved_mentionable_location(actual),
-        Grant::UserUpload => resolved.is_upload_location(actual, true),
+        Grant::UserUpload => resolved.is_upload_location(actual, PathForm::AlsoResolved),
     }
 }
 
