@@ -59,6 +59,8 @@ pub fn unique_socket() -> HerdrSocket {
 /// 假的 herdr socket:每行請求依 method 回放一行錄製回應(換上請求的 id),並記下收到的請求。
 ///
 /// `events.subscribe` 被接受(回應有 `result`)後連線保持開著，之後用 `push_event` 推事件、`end_subscriptions` 結束。
+/// 跟 herdr 0.9.5 一樣:`pane.agent_status_changed` 沒帶 `pane_id` 的訂閱回 `invalid_request`(raychiutw/purrdr.host#71),
+/// 事件只推給訂閱了那個類型(與那個 pane)的連線。
 pub struct FakeHerdr {
     pub socket: HerdrSocket,
     shared: Arc<FakeHerdrState>,
@@ -68,7 +70,44 @@ struct FakeHerdrState {
     /// method → (回應, 回應前等多久)。
     replies: Mutex<HashMap<String, (Value, Duration)>>,
     requests: Mutex<Vec<Value>>,
-    subscriptions: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<Push>>>,
+    subscriptions: Mutex<Vec<Subscription>>,
+    /// method → 只回一次的回應(先進先出，用完回到 `replies`)。
+    once: Mutex<HashMap<String, std::collections::VecDeque<Value>>>,
+}
+
+/// 一條開著的訂閱：訂了哪些(類型, pane)與推送的管道。
+struct Subscription {
+    filters: Vec<(String, Option<String>)>,
+    pushes: tokio::sync::mpsc::UnboundedSender<Push>,
+}
+
+impl Subscription {
+    /// herdr 的事件名稱有 `pane.agent_status_changed` 與 `workspace_closed` 兩種寫法，比對時把 `.` 當成 `_`。
+    fn wants(&self, line: &Value) -> bool {
+        let Some(event) = line["event"].as_str() else {
+            return true;
+        };
+        let data = &line["data"];
+        let pane = data["pane_id"].as_str().or_else(|| data["pane"]["pane_id"].as_str());
+        let normalize = |name: &str| name.replace('.', "_");
+        self.filters
+            .iter()
+            .any(|(kind, pane_id)| normalize(kind) == normalize(event) && pane_id.as_deref().is_none_or(|wanted| Some(wanted) == pane))
+    }
+}
+
+/// 訂閱的 (類型, pane);`pane.agent_status_changed` 沒帶 `pane_id` 時回 None(herdr 拒絕)。
+fn subscription_filters(params: &Value) -> Option<Vec<(String, Option<String>)>> {
+    params["subscriptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            let kind = entry["type"].as_str().unwrap_or_default().to_owned();
+            let pane_id = entry["pane_id"].as_str().map(str::to_owned);
+            (kind != "pane.agent_status_changed" || pane_id.is_some()).then_some((kind, pane_id))
+        })
+        .collect()
 }
 
 /// 推給訂閱連線的東西。
@@ -90,6 +129,7 @@ impl FakeHerdr {
             replies: Mutex::new(replies.into_iter().map(|(method, reply, delay)| (method.to_owned(), (reply, delay))).collect()),
             requests: Mutex::new(Vec::new()),
             subscriptions: Mutex::new(Vec::new()),
+            once: Mutex::new(HashMap::new()),
         });
         listen(&socket, shared.clone());
         FakeHerdr { socket, shared }
@@ -98,6 +138,11 @@ impl FakeHerdr {
     /// 之後的 `method` 請求改回 `reply`(模擬 herdr 的狀態在測試中途改變)。
     pub fn set_reply(&self, method: &str, reply: Value) {
         self.shared.replies.lock().unwrap().insert(method.to_owned(), (reply, Duration::ZERO));
+    }
+
+    /// 下一個 `method` 請求回 `reply`(只一次),之後回到原本的回應。
+    pub fn reply_once(&self, method: &str, reply: Value) {
+        self.shared.once.lock().unwrap().entry(method.to_owned()).or_default().push_back(reply);
     }
 
     /// 收到的請求(整行 JSON),依收到順序。
@@ -116,17 +161,30 @@ impl FakeHerdr {
     /// 對每條開著的訂閱推一行(事件或錯誤 envelope)。
     pub fn push_event(&self, line: Value) {
         for subscription in self.shared.subscriptions.lock().unwrap().iter() {
-            let _ = subscription.send(Push::Line(line.clone()));
+            if subscription.wants(&line) {
+                let _ = subscription.pushes.send(Push::Line(line.clone()));
+            }
         }
+    }
+
+    /// 最後一次被接受的訂閱內容(類型, pane),依請求順序。
+    pub fn last_subscription(&self) -> Vec<(String, Option<String>)> {
+        self.shared
+            .subscriptions
+            .lock()
+            .unwrap()
+            .last()
+            .map(|subscription| subscription.filters.clone())
+            .unwrap_or_default()
     }
 
     /// herdr 結束每條訂閱：先送 `last_line`(例如 `events_lost`),再關閉連線。
     pub fn end_subscriptions(&self, last_line: Option<Value>) {
         for subscription in self.shared.subscriptions.lock().unwrap().iter() {
             if let Some(line) = &last_line {
-                let _ = subscription.send(Push::Line(line.clone()));
+                let _ = subscription.pushes.send(Push::Line(line.clone()));
             }
-            let _ = subscription.send(Push::Close);
+            let _ = subscription.pushes.send(Push::Close);
         }
     }
 
@@ -137,7 +195,7 @@ impl FakeHerdr {
             .lock()
             .unwrap()
             .iter()
-            .filter(|subscription| !subscription.is_closed())
+            .filter(|subscription| !subscription.pushes.is_closed())
             .count()
     }
 
@@ -167,18 +225,23 @@ async fn serve_connection<S: AsyncRead + AsyncWrite + Unpin>(stream: S, shared: 
                 line.clear();
                 shared.requests.lock().unwrap().push(request.clone());
                 let method = request["method"].as_str().unwrap_or_default();
-                let Some((reply, delay)) = shared.replies.lock().unwrap().get(method).cloned() else {
+                let once = shared.once.lock().unwrap().get_mut(method).and_then(std::collections::VecDeque::pop_front);
+                let Some((reply, delay)) = once.map(|reply| (reply, Duration::ZERO)).or_else(|| shared.replies.lock().unwrap().get(method).cloned()) else {
                     return;
                 };
                 tokio::time::sleep(delay).await;
                 let mut reply = reply;
+                let filters = (method == "events.subscribe").then(|| subscription_filters(&request["params"]));
+                if let Some(None) = filters {
+                    reply = serde_json::json!({"error": {"code": "invalid_request", "message": "invalid request: missing field `pane_id`"}});
+                }
                 reply["id"] = request["id"].clone();
                 write_line(&mut writing, &reply).await;
-                if method == "events.subscribe"
+                if let Some(Some(filters)) = filters
                     && reply.get("result").is_some()
                     && let Some(pushes) = pushes.take()
                 {
-                    shared.subscriptions.lock().unwrap().push(pushes);
+                    shared.subscriptions.lock().unwrap().push(Subscription { filters, pushes });
                 }
             }
             Some(push) = pushed.recv() => match push {

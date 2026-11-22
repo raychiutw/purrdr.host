@@ -5,7 +5,7 @@
 //! 佇列存在狀態資料夾，重啟後還原。另外定時讀 working Agent 的畫面指紋判斷可能卡住、看 blocked 多久提醒仍在等你
 //! (raychiutw/purrdr.host#31),經推播配對送後台。觀察者不記活動紀錄與對話內容(佇列本身就是使用者要送的文字)。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -238,7 +238,7 @@ fn new_item_id() -> Result<String, getrandom::Error> {
     Ok(hex(&bytes))
 }
 
-/// 啟動常駐 task:訂閱 herdr 事件(斷線退避重連),依狀態轉換送出佇列，並定時檢查卡住與仍在等你。
+/// 啟動常駐 task:逐一 pane 訂閱 herdr 的 Agent 狀態事件(pane 增減時重新訂閱、斷線退避重連),依狀態轉換送出佇列，並定時檢查卡住與仍在等你。
 /// `home` 是推播配對(`~/.purrdr/push-*`)所在的家目錄;None 時不推播。
 /// `direct` 不為 None 時，轉換成 blocked／done 也由主機服務直接推播(raychiutw/purrdr.host#48):
 /// 每個檢查週期(預設 30 秒)重新判斷能不能送(舊版外掛在就不送)並更新 lease,訂閱斷掉時收回 lease。
@@ -258,10 +258,14 @@ pub(crate) fn spawn(
         let mut attention = AttentionDetector::new(options.stuck_after, options.reminder_after);
         let mut delay = options.reconnect_initial;
         loop {
-            if let Ok(subscription) = herdr.subscribe(json!({"subscriptions": [{"type": "pane.agent_status_changed"}]})).await {
+            if let Some((subscription, subscribed_panes)) = subscribe_to_panes(&herdr).await {
                 delay = options.reconnect_initial;
+                // pane 有增減時重新訂閱(不收回 lease、不等退避);herdr 結束訂閱才算斷線。
+                let mut panes_changed = false;
                 // 訂閱之後才讀 snapshot:中間的轉換會在訂閱裡，不會漏掉。
                 if let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await {
+                    // 讀第一份 snapshot 到訂閱之間新開或關掉的 pane:訂閱沒涵蓋，重新訂閱。
+                    panes_changed = snapshot_panes(&snapshot) != subscribed_panes;
                     let current = snapshot_statuses(&snapshot);
                     for (pane_id, status) in &current {
                         attention.status(pane_id, status, Instant::now());
@@ -283,11 +287,13 @@ pub(crate) fn spawn(
                 };
                 let (mut events, reader) = read_events(subscription);
                 let mut checks = tokio::time::interval(options.screen_check_interval);
-                loop {
+                while !panes_changed {
                     tokio::select! {
                         event = events.recv() => {
                             let Some(event) = event else { break };
-                            if let Some((pane_id, status)) = status_change(&event) {
+                            if is_pane_added_or_removed(&event) {
+                                panes_changed = true;
+                            } else if let Some((pane_id, status)) = status_change(&event) {
                                 attention.status(&pane_id, &status, Instant::now());
                                 let previous = statuses.insert(pane_id.clone(), status.clone());
                                 if previous.as_deref() == Some("working") && is_finished(&status) {
@@ -313,6 +319,9 @@ pub(crate) fn spawn(
                     }
                 }
                 reader.abort();
+                if panes_changed {
+                    continue;
+                }
                 if let Some(direct) = &direct {
                     direct.release();
                 }
@@ -408,6 +417,36 @@ fn snapshot_statuses(snapshot: &Value) -> HashMap<String, String> {
         .flatten()
         .filter_map(|agent| Some((agent["pane_id"].as_str()?.to_owned(), agent["agent_status"].as_str()?.to_owned())))
         .collect()
+}
+
+/// herdr 0.9.5 的 `pane.agent_status_changed` 只能逐一 pane 訂閱(必須帶 `pane_id`,raychiutw/purrdr.host#71):
+/// 讀 snapshot 的 pane,訂閱每個 pane 的狀態變化，加上不必指定 pane 的 `pane.created`／`pane.closed`(pane 增減時重新訂閱)。
+async fn subscribe_to_panes(herdr: &HerdrClient) -> Option<(HerdrSubscription, BTreeSet<String>)> {
+    let snapshot = herdr.request("session.snapshot", json!({})).await.ok()?;
+    let panes = snapshot_panes(&snapshot);
+    let subscriptions: Vec<Value> = [json!({"type": "pane.created"}), json!({"type": "pane.closed"})]
+        .into_iter()
+        .chain(panes.iter().map(|pane_id| json!({"type": "pane.agent_status_changed", "pane_id": pane_id})))
+        .collect();
+    let subscription = herdr.subscribe(json!({ "subscriptions": subscriptions })).await.ok()?;
+    Some((subscription, panes))
+}
+
+fn snapshot_panes(snapshot: &Value) -> BTreeSet<String> {
+    snapshot["snapshot"]["panes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|pane| Some(pane["pane_id"].as_str()?.to_owned()))
+        .collect()
+}
+
+/// 訂閱裡除了 Agent 狀態只有 pane 新增／關閉;herdr 的事件名稱有 `pane.created` 與 `pane_created` 兩種寫法。
+fn is_pane_added_or_removed(event: &Value) -> bool {
+    matches!(
+        event["event"].as_str().map(|name| name.replace('.', "_")).as_deref(),
+        Some("pane_created" | "pane_closed")
+    )
 }
 
 fn status_change(event: &Value) -> Option<(String, String)> {

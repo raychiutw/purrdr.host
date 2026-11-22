@@ -61,7 +61,14 @@ async fn pane_id_nested_in_the_pane_object_is_forwarded_and_workspace_events_hav
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
     client.request(hello("r1")).await;
-    client.request(subscribe("r2", "s1")).await;
+    client
+        .request(json!({
+            "type": "events.subscribe",
+            "request_id": "r2",
+            "stream_id": "s1",
+            "subscriptions": [{"event": "pane.agent_detected", "pane_id": "w2:p1"}, {"event": "workspace.closed"}]
+        }))
+        .await;
 
     herdr.push_event(json!({"event": "pane_agent_detected", "data": {"pane": {"pane_id": "w2:p1", "agent": "codex"}}}));
     herdr.push_event(json!({"event": "workspace_closed", "data": {"workspace_id": "w2"}}));
