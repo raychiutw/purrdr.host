@@ -22,7 +22,9 @@ struct Fixture {
 impl Fixture {
     async fn start() -> Fixture {
         let root = tempfile::tempdir_in(support::test_files_directory()).unwrap();
-        let base = std::fs::canonicalize(root.path()).unwrap();
+        // Windows 的 canonicalize 回 `\\?\C:\…`;app 送的是一般寫法。
+        let canonical = std::fs::canonicalize(root.path()).unwrap().to_string_lossy().into_owned();
+        let base = PathBuf::from(canonical.strip_prefix(r"\\?\").unwrap_or(&canonical));
         let home = base.join("home");
         let state = home.join("host-state");
         std::fs::create_dir_all(&state).unwrap();
