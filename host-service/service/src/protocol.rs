@@ -80,6 +80,16 @@ pub enum ClientMessage {
     PushTest(PushTest),
     #[serde(rename = "usage.codex")]
     UsageCodex(UsageCodex),
+    #[serde(rename = "usage.claude")]
+    UsageClaude(UsageClaude),
+    #[serde(rename = "usage.session_context")]
+    UsageSessionContext(UsageSessionContext),
+    #[serde(rename = "claude_usage.status")]
+    ClaudeUsageStatus(ClaudeUsageStatus),
+    #[serde(rename = "claude_usage.install")]
+    ClaudeUsageInstall(ClaudeUsageInstall),
+    #[serde(rename = "claude_usage.remove")]
+    ClaudeUsageRemove(ClaudeUsageRemove),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreate),
     #[serde(rename = "workspace.rename")]
@@ -125,7 +135,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::ClaudeUsageInstall(_) | ClientMessage::ClaudeUsageRemove(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
     }
 }
 
@@ -191,6 +201,16 @@ pub enum ServerMessage {
     PushTestResult(PushTestResult),
     #[serde(rename = "usage.codex.result")]
     UsageCodexResult(UsageCodexResult),
+    #[serde(rename = "usage.claude.result")]
+    UsageClaudeResult(UsageClaudeResult),
+    #[serde(rename = "usage.session_context.result")]
+    UsageSessionContextResult(UsageSessionContextResult),
+    #[serde(rename = "claude_usage.status.result")]
+    ClaudeUsageStatusResult(ClaudeUsageStatusResult),
+    #[serde(rename = "claude_usage.install.result")]
+    ClaudeUsageInstallResult(ClaudeUsageInstallResult),
+    #[serde(rename = "claude_usage.remove.result")]
+    ClaudeUsageRemoveResult(ClaudeUsageRemoveResult),
     #[serde(rename = "workspace.create.result")]
     WorkspaceCreateResult(WorkspaceCreateResult),
     #[serde(rename = "workspace.rename.result")]
@@ -1353,13 +1373,111 @@ pub struct UsageCodexResult {
     pub periods: Vec<PlanUsagePeriod>,
 }
 
+/// Claude Code 的方案用量(raychiutw/purrdr.host#62,0.12.0 起):讀 Claude status line 包裝腳本存的 ~/.purrdr/claude-usage/usage.json(整台主機一份,輸入含 rate_limits 時才寫;安裝見 claude_usage.install)的 status_line_input.rate_limits.five_hour／seven_day。唯讀，唯讀裝置也可用。沒有檔案不是錯誤:回空的 periods;installed 告訴 app 是「還沒安裝」(false)還是「已安裝、Claude Code 還沒回報」(true 且沒有 captured_at)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageClaude {
+    pub request_id: String,
+}
+
+/// Claude Code 的方案用量。已過 resets_at 的視窗不回(那個視窗已重置，檔案裡的比例過時了);缺少 used_percentage 或它為 null／不是數字的視窗略過;沒有 resets_at 的視窗照回(無法判斷是否過期，resets_at 欄位省略)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageClaudeResult {
+    pub request_id: String,
+    /// 主機上有 Claude 方案用量的安裝紀錄(~/.purrdr/claude-usage/journal.json;不論是 app 經 SSH 或主機服務裝的)。false 代表 app 該顯示「未安裝」。
+    pub installed: bool,
+    /// RFC 3339(UTC,到秒):包裝腳本存下這份用量的時間(usage.json 的 captured_at);還沒有 usage.json 時沒有這欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub captured_at: Option<String>,
+    /// 依 five_hour、week 排序(five_hour 對應 rate_limits.five_hour,week 對應 seven_day);可能是空陣列。
+    pub periods: Vec<PlanUsagePeriod>,
+}
+
+/// 每個 Claude session 的 context 用量(raychiutw/purrdr.host#62、#64,0.12.0 起):讀包裝腳本每個 session 存的 ~/.purrdr/claude-usage/sessions/<session_id>.json 的 status_line_input.context_window。唯讀，唯讀裝置也可用。只讀這個資料夾裡的檔案;沒有檔案的 session 不出現在結果。session_id 與腳本同一規則(1–128 個 A-Za-z0-9._- 字元,不是 . 或 ..),不合格回 invalid_message。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageSessionContext {
+    pub request_id: String,
+    /// 要讀的 session(herdr 回報的 agent session)。省略時回資料夾裡全部(依 captured_at 新到舊,最多 200 筆)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_ids: Option<Vec<String>>,
+}
+
+/// 各 session 的 context 用量。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UsageSessionContextResult {
+    pub request_id: String,
+    /// 有 session 檔且讀得懂的 session;指定 session_ids 時依請求順序,省略時依 captured_at 新到舊。
+    pub sessions: Vec<SessionContext>,
+}
+
+/// 一個 Claude session 最近一次 status line 回報的 context 用量。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SessionContext {
+    pub session_id: String,
+    /// RFC 3339(UTC,到秒):包裝腳本存下這份回報的時間。
+    pub captured_at: String,
+    /// context_window.used_percentage(夾在 0～100);Claude Code 沒回或為 null(第一次呼叫 API 前)時沒有這欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub used_percentage: Option<f64>,
+    /// context_window.context_window_size(token 數);沒有時沒有這欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window_size: Option<i64>,
+}
+
+/// Claude 方案用量包裝的安裝狀態(raychiutw/purrdr.host#62,0.12.0 起)。唯讀，唯讀裝置也可用。安裝紀錄壞了回 host_write_failed。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageStatus {
+    pub request_id: String,
+}
+
+/// Claude 方案用量包裝的狀態(claude_usage.install／remove 的結果欄位相同)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageStatusResult {
+    pub request_id: String,
+    /// 有安裝紀錄(~/.purrdr/claude-usage/journal.json)。
+    pub installed: bool,
+    /// settings.json(~/.claude,有 CLAUDE_CONFIG_DIR 時是該資料夾)的 statusLine.command 現在是 Purrdr 的包裝。使用者安裝後自己換掉 status line 時是 false。
+    pub wrapper_active: bool,
+    /// Claude Code 的設定資料夾存在(不存在時 claude_usage.install 回 claude_not_found)。
+    pub claude_found: bool,
+}
+
+/// 安裝 Claude status line 包裝(raychiutw/purrdr.host#62,0.12.0 起;需要使用者同意,app 先取得同意再送)。與 app 經 SSH 的 ClaudePlanUsageHost／ReversibleHostWrite 相同:把 claude-usage/statusline.sh(Windows 主機是 statusline.ps1,指令為 powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '<家目錄>/.purrdr/claude-usage/statusline.ps1')寫到 ~/.purrdr/claude-usage/,使用者原本的 statusLine.command 存進 original-command(包裝本身永遠不會被存成原本的),把 settings.json(~/.claude,有 CLAUDE_CONFIG_DIR 時是該資料夾)的 statusLine 換成包裝,其餘設定保留。安裝前的內容記在 journal.json(格式同 app 的 HostWriteJournal),重複安裝沿用第一次的紀錄;只在讀取之後設定檔沒被改過才寫入(否則回 host_write_failed)。設定檔不是合法 JSON 物件回 claude_settings_not_json、不動檔案;Claude Code 的設定資料夾不存在回 claude_not_found。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageInstall {
+    pub request_id: String,
+}
+
+/// 安裝完成,帶安裝後的狀態(欄位同 claude_usage.status.result)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageInstallResult {
+    pub request_id: String,
+    pub installed: bool,
+    pub wrapper_active: bool,
+    pub claude_found: bool,
+}
+
+/// 還原 Claude status line 包裝(raychiutw/purrdr.host#62,0.12.0 起;app 以 SSH 或主機服務裝的都能還原)。設定檔仍是安裝寫入的內容 → 換回安裝前的 bytes(原本不存在就刪除);安裝後使用者又改過 → 只撤掉 statusLine 的修改(statusLine 已被使用者換掉就不動),其餘保留;最後移除 ~/.purrdr/claude-usage/。沒有安裝紀錄時什麼都不做。目前的設定檔不是合法 JSON 物件且需要合併時回 claude_settings_not_json、不動檔案。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageRemove {
+    pub request_id: String,
+}
+
+/// 還原完成,帶還原後的狀態(欄位同 claude_usage.status.result)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ClaudeUsageRemoveResult {
+    pub request_id: String,
+    pub installed: bool,
+    pub wrapper_active: bool,
+    pub claude_found: bool,
+}
+
 /// 方案用量的一個週期。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanUsagePeriod {
     pub kind: PlanUsagePeriodKind,
     /// 已用比例(夾在 0～100,不四捨五入：app 依它算剩餘比例與進度條)。
     pub used_percentage: f64,
-    /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。
+    /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回、或 Claude 的 status line 輸入沒帶 resets_at(缺少或為 null)時沒有這欄。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resets_at: Option<String>,
 }
@@ -1565,7 +1683,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);codex_not_found:usage.codex 找不到 codex 執行檔;codex_not_signed_in:Codex 沒以 ChatGPT 登入(或用 API key);codex_failed:codex app-server 回報失敗、沒有回應或回應看不懂(message 是原因);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);codex_not_found:usage.codex 找不到 codex 執行檔;codex_not_signed_in:Codex 沒以 ChatGPT 登入(或用 API key);codex_failed:codex app-server 回報失敗、沒有回應或回應看不懂(message 是原因);claude_not_found:claude_usage.install 時 Claude Code 的設定資料夾(~/.claude 或 CLAUDE_CONFIG_DIR)不存在;claude_settings_not_json:Claude 的 settings.json 不是合法的 JSON 物件，沒有改動檔案(0.12.0 起);host_write_failed:claude_usage.* 的檔案無法安全修改(安裝紀錄壞了、設定檔不是一般檔案或讀不到、讀取之後被改過;message 是原因);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1616,6 +1734,12 @@ pub enum ErrorCode {
     CodexNotSignedIn,
     #[serde(rename = "codex_failed")]
     CodexFailed,
+    #[serde(rename = "claude_not_found")]
+    ClaudeNotFound,
+    #[serde(rename = "claude_settings_not_json")]
+    ClaudeSettingsNotJson,
+    #[serde(rename = "host_write_failed")]
+    HostWriteFailed,
     #[serde(rename = "upload_too_large")]
     UploadTooLarge,
     #[serde(rename = "device_unknown")]
