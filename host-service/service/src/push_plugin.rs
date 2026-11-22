@@ -35,6 +35,23 @@ const PAIRING_NOT_FOUND: u16 = 404;
 /// 後台：這組配對已撤銷。
 const PAIRING_REVOKED: u16 = 410;
 
+/// 更新推播外掛的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginUpdate {
+    /// 沒裝外掛:不代裝,什麼都不做。
+    NotInstalled,
+    /// `herdr plugin update` 成功。
+    Updated,
+}
+
+/// 自動更新排程用:外掛有裝才更新(`herdr plugin update purrdr.push --yes`),失敗回 herdr 的訊息。
+pub async fn update_plugin(herdr: &HerdrCli) -> Result<PluginUpdate, String> {
+    PushPlugin::new(herdr.clone(), None)
+        .update_plugin()
+        .await
+        .map_err(|failure| failure.to_string())
+}
+
 /// Windows:不開 console 視窗(背景執行檔沒有 console)。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -107,6 +124,18 @@ pub(crate) enum PushFailure {
     Internal(String),
 }
 
+impl std::fmt::Display for PushFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PushFailure::InvalidRequest(message) => formatter.write_str(message),
+            PushFailure::HerdrUnavailable(message) | PushFailure::Herdr(message) | PushFailure::SendFailed(message) | PushFailure::Internal(message) => {
+                formatter.write_str(message)
+            }
+            PushFailure::NotPaired => formatter.write_str("not paired"),
+        }
+    }
+}
+
 impl From<std::io::Error> for PushFailure {
     fn from(error: std::io::Error) -> Self {
         PushFailure::Internal(error.to_string())
@@ -176,6 +205,18 @@ impl PushPlugin {
             }
         }
         self.state(device_id).await
+    }
+
+    /// 外掛有裝才更新到最新版;沒裝不代裝。
+    pub async fn update_plugin(&self) -> Result<PluginUpdate, PushFailure> {
+        let _serial = self.serial.lock().await;
+        if !self.plugin_presence().await?.installed() {
+            return Ok(PluginUpdate::NotInstalled);
+        }
+        // 與安裝一樣要下載,用較長的逾時;plugin update 對所有 session 生效,不帶 `--session`。
+        self.run(self.herdr.program_arguments(), &["plugin", "update", PLUGIN_ID, "--yes"], INSTALL_TIMEOUT)
+            .await?;
+        Ok(PluginUpdate::Updated)
     }
 
     /// 只改寫配對檔的靜音清單(保留 key 與 endpoint),不呼叫 herdr。
