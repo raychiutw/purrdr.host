@@ -132,6 +132,7 @@ fn only_write_messages_are_marked_as_write() {
     for name in [
         "client.workspace-create.json",
         "client.workspace-rename.json",
+        "client.tab-rename.json",
         "client.workspace-close.json",
         "client.worktree-create.json",
         "client.agent-start.json",

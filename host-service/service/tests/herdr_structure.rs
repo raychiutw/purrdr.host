@@ -128,6 +128,47 @@ async fn workspace_rename_is_forwarded_and_returns_the_label_herdr_kept() {
 }
 
 #[tokio::test]
+async fn tab_rename_is_forwarded_and_returns_the_label_herdr_kept() {
+    let herdr = herdr_with(vec![("tab.rename", platform_recorded("tab.rename.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client
+        .request(json!({"type": "tab.rename", "request_id": "r2", "tab_id": "w1:t1", "label": "build-logs"}))
+        .await;
+
+    assert_eq!(reply, json!({"type": "tab.rename.result", "request_id": "r2", "label": "build-logs"}));
+    assert_eq!(forwarded(&herdr, "tab.rename"), json!({"tab_id": "w1:t1", "label": "build-logs"}));
+}
+
+#[tokio::test]
+async fn tab_rename_rejects_unsafe_ids_and_blank_labels() {
+    for (tab_id, label) in [("-t1", "logs"), ("t1;rm", "logs"), ("", "logs"), ("w1:t1", "")] {
+        rejected_without_reaching_herdr(
+            json!({"type": "tab.rename", "request_id": "r2", "tab_id": tab_id, "label": label}),
+            "tab.rename",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn tab_rename_of_missing_tab_keeps_herdr_error_code() {
+    let herdr = herdr_with(vec![("tab.rename", platform_recorded("error.tab-rename-not-found.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client
+        .request(json!({"type": "tab.rename", "request_id": "r2", "tab_id": "w9:t9", "label": "x"}))
+        .await;
+
+    assert_eq!(reply["code"], "herdr_error");
+    assert_eq!(reply["herdr_code"], "tab_not_found");
+}
+
+#[tokio::test]
 async fn workspace_rename_rejects_unsafe_ids_and_blank_labels() {
     for (workspace_id, label) in [("-w1", "garden"), ("w1;rm", "garden"), ("", "garden"), ("w1", "")] {
         rejected_without_reaching_herdr(
@@ -357,6 +398,7 @@ fn every_operation(folder: &TempDir) -> Vec<Value> {
     vec![
         json!({"type": "workspace.create", "request_id": "r2", "cwd": path_text(folder)}),
         json!({"type": "workspace.rename", "request_id": "r3", "workspace_id": "w1", "label": "garden-notes"}),
+        json!({"type": "tab.rename", "request_id": "r7", "tab_id": "w1:t1", "label": "build-logs"}),
         json!({"type": "workspace.close", "request_id": "r4", "workspace_id": "w2"}),
         json!({"type": "worktree.create", "request_id": "r5", "workspace_id": "w1", "branch": "feature/sketch"}),
         agent_start("r6"),
@@ -404,6 +446,7 @@ async fn read_only_device_is_refused_and_audited_with_the_target_workspace_or_pa
         [
             json!(["workspace.create", null, null, false]),
             json!(["workspace.rename", "w1", null, false]),
+            json!(["tab.rename", null, null, false]),
             json!(["workspace.close", "w2", null, false]),
             json!(["worktree.create", "w1", null, false]),
             json!(["agent.start", null, "w3:p1", false]),

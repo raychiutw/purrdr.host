@@ -10,8 +10,8 @@ use crate::herdr_client::HerdrClient;
 use crate::http::blocking;
 use crate::pane_terminal;
 use crate::protocol::{
-    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult,
-    WorkspaceRename, WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
+    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, TabRename, TabRenameResult, WorkspaceClose, WorkspaceCloseResult,
+    WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename, WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
 };
 use crate::session_history;
 use crate::transcript::TranscriptEnvironment;
@@ -75,6 +75,21 @@ pub async fn workspace_rename(herdr: &HerdrClient, request: WorkspaceRename) -> 
             label: result["workspace"]["label"].as_str().map(str::to_owned),
         }),
         Err(failure) => herdr_error(request.request_id, "workspace.rename", failure),
+    }
+}
+
+/// 重新命名 tab,回傳 herdr 實際保存的名稱(herdr 回的 result 沒有 tab.label 時省略)。
+pub async fn tab_rename(herdr: &HerdrClient, request: TabRename) -> ServerMessage {
+    if !is_valid_id(&request.tab_id) || !is_valid_label(&request.label) {
+        return invalid(request.request_id, "invalid tab_id or label");
+    }
+    let params = json!({"tab_id": request.tab_id, "label": request.label});
+    match herdr.request("tab.rename", params).await {
+        Ok(result) => ServerMessage::TabRenameResult(TabRenameResult {
+            request_id: request.request_id,
+            label: result["tab"]["label"].as_str().map(str::to_owned),
+        }),
+        Err(failure) => herdr_error(request.request_id, "tab.rename", failure),
     }
 }
 
