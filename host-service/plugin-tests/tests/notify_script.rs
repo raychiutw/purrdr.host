@@ -25,7 +25,8 @@ fn manifest_declares_hooks() {
     let manifest: toml::Table = text.parse().unwrap();
     assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
     // 0.2.0 起會讓位給主機服務的 lease(raychiutw/purrdr.host#48);主機服務靠這個版本號判斷舊 plugin 不能共存。
-    assert_eq!(manifest["version"].as_str(), Some("0.2.0"));
+    // 0.2.1 起推播多帶 tab(raychiutw/purrdr.host#74)。
+    assert_eq!(manifest["version"].as_str(), Some("0.2.1"));
 
     let events = manifest["events"].as_array().expect("沒有 [[events]]");
     let hooks: Vec<(&str, Vec<&str>, Vec<&str>)> = events
@@ -106,6 +107,19 @@ mod notify_sh {
         event("blocked", "w2:p1")
     }
 
+    /// herdr 事件沒帶 agent 名稱(欄位缺漏時)。
+    fn blocked_without_agent() -> String {
+        r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"blocked"}}"#
+            .to_owned()
+    }
+
+    /// herdr `tab get` 的回覆(`label` 照 JSON 原樣放入)。
+    fn tab_reply(label: &str) -> String {
+        format!(
+            r#"{{"id":"cli:tab:get","result":{{"tab":{{"agent_status":"blocked","focused":false,"label":"{label}","number":10,"pane_count":1,"tab_id":"w2:t3","workspace_id":"w2"}},"type":"tab_info"}}}}"#
+        )
+    }
+
     fn context(label: &str) -> String {
         format!(
             r#"{{"workspace_id":"w2","workspace_label":"{label}","focused_pane_id":"w2:p1","focused_pane_agent":"claude","focused_pane_status":"blocked","correlation_id":"evt-1"}}"#
@@ -134,11 +148,21 @@ fi
 printf '%s' "$code"
 "#;
 
-    /// `herdr pane get <pane>`:回傳該 pane 的 agent session(錄自 herdr 0.9.5 的 `pane list` 欄位形狀)。
+    /// 假 herdr:`pane get <pane>` 回傳該 pane 的 agent、session 與 tab id(錄自 herdr 0.9.5 的欄位形狀，
+    /// 終端機標題 `terminal_title` 是對話內容，外掛不能送出);`tab get <tab>` 回傳 tab 的 label。
+    /// 家目錄有 `herdr-pane-reply`／`herdr-tab-reply` 時改回那個檔案的內容;
+    /// 沒有 `herdr-tab-reply` 時 `tab get` 失敗(模擬查不到 Tab label)。
     const FAKE_HERDR: &str = r#"#!/bin/sh
 printf '%s\n' "$*" >> "$HOME/herdr-calls"
 if [ "$1 $2" = "pane get" ]; then
-  printf '%s\n' '{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"session-weather"},"agent_status":"blocked","pane_id":"w2:p1","workspace_id":"w2"},"type":"pane_info"}}'
+  if [ -f "$HOME/herdr-pane-reply" ]; then
+    cat "$HOME/herdr-pane-reply"
+  else
+    printf '%s\n' '{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"session-weather"},"agent_status":"blocked","pane_id":"w2:p1","tab_id":"w2:t3","terminal_title":"secret-plan","workspace_id":"w2"},"type":"pane_info"}}'
+  fi
+elif [ "$1 $2" = "tab get" ]; then
+  [ -f "$HOME/herdr-tab-reply" ] || exit 1
+  cat "$HOME/herdr-tab-reply"
 fi
 "#;
 
@@ -275,11 +299,13 @@ fi
         assert_eq!(call.arguments.last().map(String::as_str), Some(ENDPOINT));
         let mut keys: Vec<&str> = call.body.keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["key", "pane", "status", "workspace"]);
+        assert_eq!(keys, ["key", "pane", "status", "tab", "workspace"]);
         assert_eq!(call.body["key"], key_a().as_str());
         assert_eq!(call.body["workspace"], "weather-app");
         assert_eq!(call.body["status"], "blocked");
         assert_eq!(call.body["pane"], "w2:p1");
+        // 查不到 Tab label(假 herdr 的 tab get 失敗)→ 用 Agent 名稱。
+        assert_eq!(call.body["tab"], "claude");
     }
 
     /// 推播請求不含終端機標題等對話內容
@@ -323,11 +349,12 @@ fi
         assert_eq!(calls.len(), 1);
         let mut keys: Vec<&str> = calls[0].body.keys().map(String::as_str).collect();
         keys.sort();
-        assert_eq!(keys, ["key", "pane", "status", "workspace"]);
+        assert_eq!(keys, ["key", "pane", "status", "tab", "workspace"]);
         assert_eq!(calls[0].body["key"], key_a().as_str());
         assert_eq!(calls[0].body["workspace"], "weather-app");
         assert_eq!(calls[0].body["status"], "done");
         assert_eq!(calls[0].body["pane"], "w2:p1");
+        assert_eq!(calls[0].body["tab"], "claude");
         assert!(!calls[0].raw_body.contains("secret-plan"));
     }
 
@@ -407,14 +434,196 @@ fi
         assert!(herdr_calls.contains("pane get w2:p1"));
     }
 
-    /// 沒有任何靜音時不必問 herdr
+    /// 沒有配對裝置時不必問 herdr(沒人要收推播，不為它查 Tab)
     #[test]
-    fn without_mutes_herdr_is_not_asked() {
+    fn without_pairings_herdr_is_not_asked() {
         let host = Host::new();
-        host.pair("a1", &key_a(), &[]);
 
         host.run_hook(&blocked(), &default_context());
 
+        assert!(!host.path("herdr-calls").exists());
+    }
+
+    /// 多支裝置也只問 herdr 一次(pane get 與 tab get 各一次)
+    #[test]
+    fn herdr_is_asked_once_for_all_devices() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &["session-other"]);
+        host.pair("b2", &key_b(), &[]);
+
+        host.run_hook(&blocked(), &default_context());
+
+        let herdr_calls = std::fs::read_to_string(host.path("herdr-calls")).unwrap();
+        assert_eq!(herdr_calls.lines().collect::<Vec<_>>(), ["pane get w2:p1", "tab get w2:t3"]);
+    }
+
+    /// 有 Tab label:`tab` 用它(不帶 Agent 名稱、終端機標題)
+    #[test]
+    fn tab_label_is_sent_when_the_tab_has_one() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write("herdr-tab-reply", &tab_reply("後台 API"));
+
+        host.run_hook(&blocked(), &default_context());
+
+        let calls = host.curl_calls();
+        let call = calls.first().expect("有送出推播");
+        assert_eq!(call.body["tab"], "後台 API");
+        assert!(!call.raw_body.contains("secret-plan"));
+    }
+
+    /// Tab label 含引號與反斜線時仍送出合法 JSON,名稱不變
+    #[test]
+    fn tab_label_escapes_survive() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write("herdr-tab-reply", &tab_reply(r#"fix \"login\" \\ bug"#));
+
+        host.run_hook(&blocked(), &default_context());
+
+        let calls = host.curl_calls();
+        let call = calls.first().expect("有送出推播");
+        assert_eq!(call.body["tab"], r#"fix "login" \ bug"#);
+    }
+
+    /// 後台的 `tab` 最長 100 字元(超過回 400):以 UTF-16 單位計 100 截斷，不切壞 UTF-8、不切開代理對;剛好 100 不動
+    #[test]
+    fn long_tab_label_is_truncated_to_100_utf16_units() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        for (label, expected) in [
+            ("天".repeat(150), "天".repeat(100)),
+            ("天".repeat(100), "天".repeat(100)),
+            ("a".repeat(101), "a".repeat(100)),
+            // é 算 1 個單位、🙂 算 2 個:33 組是 99 個單位，再放 é 剛好 100。
+            ("é🙂".repeat(80), format!("{}é", "é🙂".repeat(33))),
+            // 🙂 跨過第 100 個單位:整個捨棄，不留半個代理對。
+            (format!("{}🙂tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}🙂", "a".repeat(98)), format!("{}🙂", "a".repeat(98))),
+            // 截斷後尾端剩空白要再去掉。
+            (format!("{} 🙂tail", "a".repeat(98)), "a".repeat(98)),
+        ] {
+            host.write("herdr-tab-reply", &tab_reply(&label));
+            host.run_hook(&blocked(), &default_context());
+            let calls = host.curl_calls();
+            let call = calls.last().expect("有送出推播");
+            assert_eq!(call.body["tab"], expected.as_str(), "{label}");
+        }
+    }
+
+    /// 截斷點在跳脫序列(`\"`、`\uXXXX`)上時，整個序列算一個字元、不被切開，送出的仍是合法 JSON
+    #[test]
+    fn truncation_never_splits_a_json_escape() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        for (label, expected) in [
+            (format!("{}\\\"tail", "a".repeat(99)), format!("{}\"", "a".repeat(99))),
+            (format!("{}\\u00e9tail", "a".repeat(99)), format!("{}é", "a".repeat(99))),
+            (format!("{}\\\\tail", "a".repeat(99)), format!("{}\\", "a".repeat(99))),
+            // 跳脫的代理對(`\ud83d\ude00` = 😀)算 2 個單位:跨過第 100 個時整對捨棄，不能只留高位。
+            (format!("{}\\ud83d\\ude00tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}\\ud83d\\ude00tail", "a".repeat(98)), format!("{}😀", "a".repeat(98))),
+            // 逸出的反斜線後面接 `ud83d` 字樣是一般文字，不是代理對。
+            (format!("{}\\\\ud83dtail", "a".repeat(94)), format!("{}\\ud83d", "a".repeat(94))),
+        ] {
+            host.write("herdr-tab-reply", &tab_reply(&label));
+            host.run_hook(&blocked(), &default_context());
+            let calls = host.curl_calls();
+            let call = calls.last().expect("有送出推播");
+            assert_eq!(call.body.get("tab").and_then(Value::as_str), Some(expected.as_str()), "{}", call.raw_body);
+        }
+    }
+
+    /// 只有空白的 Tab label 等於沒有:用 Agent 名稱;前後空白去掉
+    #[test]
+    fn blank_tab_label_falls_back_and_surrounding_spaces_are_trimmed() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        host.write("herdr-tab-reply", &tab_reply("   "));
+        host.run_hook(&blocked(), &default_context());
+        host.write("herdr-tab-reply", &tab_reply("  後台 API  "));
+        host.run_hook(&blocked(), &default_context());
+
+        let tabs: Vec<Value> = host.curl_calls().iter().map(|call| call.body["tab"].clone()).collect();
+        assert_eq!(tabs, ["claude", "後台 API"].map(Value::from));
+    }
+
+    /// 只有空白的 Agent 名稱也省略 `tab`
+    #[test]
+    fn blank_agent_name_omits_the_tab() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let event = r#"{"event":"pane_agent_status_changed","data":{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"blocked","agent":"  "}}"#;
+        host.write(
+            "herdr-pane-reply",
+            r#"{"id":"cli:pane:get","result":{"pane":{"pane_id":"w2:p1","tab_id":"w2:t3","workspace_id":"w2"},"type":"pane_info"}}"#,
+        );
+
+        host.run_hook(event, &default_context());
+
+        let calls = host.curl_calls();
+        let call = calls.first().expect("有送出推播");
+        assert!(!call.body.contains_key("tab"), "{}", call.raw_body);
+    }
+
+    /// herdr 預設的 Tab 名稱是順序號(`1`、`2`…),不是使用者取的名字:當作沒有 label,改用 Agent 名稱
+    #[test]
+    fn numeric_default_tab_label_falls_back_to_agent_name() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write("herdr-tab-reply", &tab_reply("2"));
+
+        host.run_hook(&blocked(), &default_context());
+
+        assert_eq!(host.curl_calls().first().map(|call| call.body["tab"].clone()), Some(Value::from("claude")));
+    }
+
+    /// 沒有 Tab label(空字串)用該 Pane 的 Agent 名稱;事件沒帶 agent 時改用 pane get 的 agent
+    #[test]
+    fn missing_tab_label_falls_back_to_agent_name() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write("herdr-tab-reply", &tab_reply(""));
+
+        host.run_hook(&blocked(), &default_context());
+        host.run_hook(&blocked_without_agent(), &default_context());
+
+        let tabs: Vec<Value> = host.curl_calls().iter().map(|call| call.body["tab"].clone()).collect();
+        assert_eq!(tabs, [Value::from("claude"), Value::from("claude")]);
+    }
+
+    /// Tab label 與 Agent 名稱都沒有:省略 `tab`(其餘欄位照送)
+    #[test]
+    fn tab_is_omitted_when_there_is_no_label_and_no_agent() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write(
+            "herdr-pane-reply",
+            r#"{"id":"cli:pane:get","result":{"pane":{"pane_id":"w2:p1","tab_id":"w2:t3","workspace_id":"w2"},"type":"pane_info"}}"#,
+        );
+
+        host.run_hook(&blocked_without_agent(), &default_context());
+
+        let calls = host.curl_calls();
+        let call = calls.first().expect("有送出推播");
+        assert!(!call.body.contains_key("tab"), "{}", call.raw_body);
+        assert_eq!(call.body["workspace"], "weather-app");
+    }
+
+    /// 沒有 pane id 時不問 herdr,`tab` 用事件裡的 Agent 名稱
+    #[test]
+    fn without_a_pane_the_agent_name_is_still_sent() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        host.run_hook(&event("blocked", "w2:p1;rm"), &default_context());
+
+        let calls = host.curl_calls();
+        let call = calls.first().expect("有送出推播");
+        assert_eq!(call.body["tab"], "claude");
         assert!(!host.path("herdr-calls").exists());
     }
 
@@ -669,10 +878,21 @@ mod notify_ps1 {
 
     use super::plugin_directory;
 
-    fn event(status: &str) -> String {
+    /// `agent` 是 herdr 事件帶的 Agent 名稱(None 是欄位缺漏)。
+    fn event_with(status: &str, agent: Option<&str>) -> String {
+        let agent = agent.map(|agent| format!(r#","agent":"{agent}""#)).unwrap_or_default();
         format!(
-            r#"{{"event":"pane_agent_status_changed","data":{{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"{status}"}}}}"#
+            r#"{{"event":"pane_agent_status_changed","data":{{"type":"pane_agent_status_changed","pane_id":"w2:p1","workspace_id":"w2","agent_status":"{status}"{agent}}}}}"#
         )
+    }
+
+    /// 假 herdr(`herdr.cmd`,放在暫存家目錄):`pane get` 與 `tab get` 回傳家目錄裡 `herdr-pane-reply`／`herdr-tab-reply` 的內容,
+    /// 檔案不存在就失敗(模擬 herdr 查不到)。
+    const FAKE_HERDR: &str = "@echo off\r\nif \"%1 %2\"==\"pane get\" (\r\n  if exist \"%USERPROFILE%\\herdr-pane-reply\" (type \"%USERPROFILE%\\herdr-pane-reply\") else (exit /b 1)\r\n) else if \"%1 %2\"==\"tab get\" (\r\n  if exist \"%USERPROFILE%\\herdr-tab-reply\" (type \"%USERPROFILE%\\herdr-tab-reply\") else (exit /b 1)\r\n)\r\n";
+    const PANE_REPLY: &str = r#"{"id":"cli:pane:get","result":{"pane":{"agent":"claude","agent_session":{"agent":"claude","kind":"id","source":"herdr:claude","value":"session-weather"},"pane_id":"w2:p1","tab_id":"w2:t3","terminal_title":"secret-plan","workspace_id":"w2"},"type":"pane_info"}}"#;
+
+    fn tab_reply(label: &str) -> String {
+        format!(r#"{{"id":"cli:tab:get","result":{{"tab":{{"label":"{label}","number":10,"tab_id":"w2:t3","workspace_id":"w2"}},"type":"tab_info"}}}}"#)
     }
     const CONTEXT: &str = r#"{"workspace_id":"w2","workspace_label":"weather-app"}"#;
 
@@ -739,6 +959,10 @@ mod notify_ps1 {
             keys
         }
 
+        fn bodies(&self) -> Vec<Value> {
+            self.received.lock().unwrap().clone()
+        }
+
         fn statuses(&self) -> Vec<String> {
             self.received
                 .lock()
@@ -780,6 +1004,13 @@ mod notify_ps1 {
 
         /// 同 `run_hook_with_status`,另外帶 herdr 注入的 `HERDR_SOCKET_PATH`。
         fn run_hook_with(&self, status: &str, socket: Option<&str>) -> i32 {
+            self.run_hook_full(status, None, socket)
+        }
+
+        /// 同 `run_hook_with`,另外帶事件裡的 Agent 名稱;`HERDR_BIN_PATH` 指向假 herdr。
+        fn run_hook_full(&self, status: &str, agent: Option<&str>, socket: Option<&str>) -> i32 {
+            let herdr = self.home.path().join("herdr.cmd");
+            std::fs::write(&herdr, FAKE_HERDR).unwrap();
             Command::new("powershell")
                 .env_remove("HERDR_SOCKET_PATH")
                 .envs(socket.map(|socket| ("HERDR_SOCKET_PATH", socket)))
@@ -787,8 +1018,9 @@ mod notify_ps1 {
                 .arg(plugin_directory().join("notify.ps1"))
                 .env("USERPROFILE", self.home.path())
                 .env("HERDR_PLUGIN_EVENT", "pane.agent_status_changed")
-                .env("HERDR_PLUGIN_EVENT_JSON", event(status))
+                .env("HERDR_PLUGIN_EVENT_JSON", event_with(status, agent))
                 .env("HERDR_PLUGIN_CONTEXT_JSON", CONTEXT)
+                .env("HERDR_BIN_PATH", herdr)
                 .status()
                 .unwrap()
                 .code()
@@ -802,6 +1034,93 @@ mod notify_ps1 {
 
     fn key_b() -> String {
         "cd".repeat(32)
+    }
+
+    fn write(host: &Host, name: &str, contents: &str) {
+        std::fs::write(host.home.path().join(name), contents).unwrap();
+    }
+
+    /// 有 Tab label:`tab` 用它;不帶終端機標題等對話內容
+    #[test]
+    fn tab_label_is_sent_when_the_tab_has_one() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        write(&host, "herdr-pane-reply", PANE_REPLY);
+        write(&host, "herdr-tab-reply", &tab_reply("後台 API"));
+
+        assert_eq!(host.run_hook_full("blocked", Some("claude"), None), 0);
+
+        let bodies = backend.bodies();
+        assert_eq!(bodies.len(), 1);
+        assert_eq!(bodies[0]["tab"], "後台 API");
+        assert!(!bodies[0].to_string().contains("secret-plan"));
+    }
+
+    /// 沒有 Tab label(查不到、空字串、或 herdr 預設的順序號)用 Agent 名稱;事件沒帶 agent 時用 pane get 的 agent
+    #[test]
+    fn missing_or_numeric_tab_label_falls_back_to_agent_name() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        write(&host, "herdr-pane-reply", PANE_REPLY);
+
+        // tab get 失敗。
+        host.run_hook_full("blocked", Some("claude"), None);
+        // 空字串。
+        write(&host, "herdr-tab-reply", &tab_reply(""));
+        host.run_hook_full("blocked", Some("claude"), None);
+        // 順序號。
+        write(&host, "herdr-tab-reply", &tab_reply("2"));
+        host.run_hook_full("blocked", Some("claude"), None);
+        // 事件沒帶 agent。
+        host.run_hook_full("blocked", None, None);
+
+        let tabs: Vec<Value> = backend.bodies().iter().map(|body| body["tab"].clone()).collect();
+        assert_eq!(tabs, ["claude", "claude", "claude", "claude"].map(Value::from));
+    }
+
+    /// Tab label 與 Agent 名稱都沒有:省略 `tab`(其餘欄位照送)
+    #[test]
+    fn tab_is_omitted_when_there_is_no_label_and_no_agent() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        assert_eq!(host.run_hook_full("blocked", None, None), 0);
+
+        let bodies = backend.bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0].get("tab").is_none(), "{}", bodies[0]);
+        assert_eq!(bodies[0]["workspace"], "weather-app");
+    }
+
+    /// 後台的 `tab` 最長 100 字元、全空白視同沒帶:以 UTF-16 單位計 100 截斷(不切開代理對)、前後空白去掉、空白 label 改用 Agent 名稱
+    #[test]
+    fn tab_is_cut_to_100_utf16_units_and_blank_labels_fall_back() {
+        let cases = [
+            ("天".repeat(150), "天".repeat(100)),
+            // UTF-16 每組 3 個單位:33 組 99 個單位 + é = 100,不切開下一個代理對。
+            ("é🙂".repeat(80), format!("{}é", "é🙂".repeat(33))),
+            // 🙂 跨過第 100 個單位:整個捨棄，不留半個代理對。
+            (format!("{}🙂tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}🙂", "a".repeat(98)), format!("{}🙂", "a".repeat(98))),
+            // 截斷後尾端剩空白要再去掉。
+            (format!("{} 🙂tail", "a".repeat(98)), "a".repeat(98)),
+            ("  後台 API  ".to_owned(), "後台 API".to_owned()),
+            ("   ".to_owned(), "claude".to_owned()),
+        ];
+        for (label, expected) in cases {
+            let backend = Backend::start(HashMap::new());
+            let host = Host::new();
+            host.pair("a1", &key_a(), &backend.endpoint);
+            write(&host, "herdr-pane-reply", PANE_REPLY);
+            write(&host, "herdr-tab-reply", &tab_reply(&label));
+
+            host.run_hook_full("blocked", Some("claude"), None);
+
+            assert_eq!(backend.bodies()[0]["tab"], expected.as_str(), "{label}");
+        }
     }
 
     fn write_lease(host: &Host, socket: &str, updated: u64) {

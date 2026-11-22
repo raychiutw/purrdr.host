@@ -14,8 +14,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::host_path_mentions;
-use crate::protocol::{EXCLUDED_FILE_LOCATIONS, FileStatus, MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, TEMPORARY_FILE_LOCATIONS};
+use crate::protocol::{EXCLUDED_FILE_LOCATIONS, FileStatus, MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, TEMPORARY_FILE_LOCATIONS, UPLOAD_FOLDER};
 use crate::text_format::hex;
+use crate::uploads::legacy_upload_path;
 
 /// 路徑任何位置連續出現排除清單的段落(不分大小寫;`*` 結尾比對段落開頭)。
 pub fn is_excluded(path: &Path) -> bool {
@@ -66,18 +67,21 @@ pub enum Grant {
     WorkingDirectory(PathBuf),
     /// Agent 在對話紀錄寫出的路徑，且在暫存、上傳或附檔資料夾。
     MentionedLocation,
+    /// 使用者 prompt 裡的路徑，且在 Purrdr 上傳資料夾(暫存目錄的 `x-upload-folder` 或相容期的舊 `.purrdr/uploads`)。
+    UserUpload,
 }
 
 impl FileAccessRules {
     /// 只看路徑判斷;`is_mentioned` 只在需要時才查(要讀對話紀錄)。
-    pub fn grant(&self, requested: &str, is_mentioned: impl FnOnce() -> bool) -> Option<Grant> {
+    /// `is_prompted`:路徑出現在使用者 prompt 裡(只放行在上傳資料夾的路徑)。
+    pub fn grant(&self, requested: &str, is_mentioned: impl FnOnce() -> bool, is_prompted: impl FnOnce() -> bool) -> Option<Grant> {
         if !is_plain_absolute(requested) {
             return None;
         }
-        self.grant_path(Path::new(requested), is_mentioned)
+        self.grant_path(Path::new(requested), is_mentioned, is_prompted)
     }
 
-    fn grant_path(&self, path: &Path, is_mentioned: impl FnOnce() -> bool) -> Option<Grant> {
+    fn grant_path(&self, path: &Path, is_mentioned: impl FnOnce() -> bool, is_prompted: impl FnOnce() -> bool) -> Option<Grant> {
         if self.is_excluded(path) {
             return None;
         }
@@ -88,7 +92,10 @@ impl FileAccessRules {
         {
             return Some(Grant::WorkingDirectory(root.clone()));
         }
-        (self.is_mentionable_location(path) && is_mentioned()).then_some(Grant::MentionedLocation)
+        if self.is_mentionable_location(path) && is_mentioned() {
+            return Some(Grant::MentionedLocation);
+        }
+        (self.is_upload_location(path, PathForm::AsRequested) && is_prompted()).then_some(Grant::UserUpload)
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
@@ -101,8 +108,8 @@ impl FileAccessRules {
         is_root || self.home.as_deref().is_some_and(|home| is_under_or_same(home, directory))
     }
 
-    /// 工作目錄以外，Agent 提到時可放行的位置。
-    fn mentionable_locations(&self) -> Vec<PathBuf> {
+    /// 系統暫存目錄：schema 的標準位置、主機的 `TMPDIR`／`TEMP` 與 Windows 家目錄的 `AppData/Local/Temp`。
+    fn temporary_locations(&self) -> Vec<PathBuf> {
         let mut locations: Vec<PathBuf> = TEMPORARY_FILE_LOCATIONS
             .iter()
             .map(PathBuf::from)
@@ -111,7 +118,15 @@ impl FileAccessRules {
         locations.extend(self.temporary_directories.iter().cloned());
         if let Some(home) = &self.home {
             locations.push(home.join("AppData").join("Local").join("Temp"));
-            locations.push(home.join(".purrdr").join("uploads"));
+        }
+        locations
+    }
+
+    /// 工作目錄以外，Agent 提到時可放行的位置。
+    fn mentionable_locations(&self) -> Vec<PathBuf> {
+        let mut locations = self.temporary_locations();
+        if let Some(home) = &self.home {
+            locations.push(legacy_upload_path(home));
         }
         for transcript in &self.transcripts {
             if let (Some(folder), Some(stem)) = (transcript.parent(), transcript.file_stem()) {
@@ -119,6 +134,28 @@ impl FileAccessRules {
             }
         }
         locations
+    }
+
+    /// Purrdr 上傳資料夾:**暫存位置的直接子資料夾**,名為 `purrdr-uploads`(Windows)或 `purrdr-uploads-<uid>`(Unix),
+    /// 以及相容期的舊版 `<家目錄>/.purrdr/uploads`。暫存目錄不在標準位置時(例如 macOS 的 `/var/folders/…/T`)靠主機的
+    /// `TMPDIR` 認得。暫存位置底下更深一層的同名資料夾、名稱像上傳資料夾卻不在暫存位置的都不算
+    /// (Agent 可以在那裡放任意內容)。`form` 為 `AlsoResolved` 時每個位置也比對解析 symlink 後的寫法。
+    fn is_upload_location(&self, path: &Path, form: PathForm) -> bool {
+        let roots_of = |root: &Path| -> Vec<PathBuf> {
+            let resolved = (form == PathForm::AlsoResolved).then(|| resolve(root)).flatten();
+            std::iter::once(root.to_owned()).chain(resolved).collect()
+        };
+        let in_temporary_upload_folder = self
+            .temporary_locations()
+            .iter()
+            .flat_map(|root| roots_of(root))
+            .any(|root| is_in_direct_child_upload_folder(path, &root));
+        in_temporary_upload_folder
+            || self
+                .home
+                .as_deref()
+                .map(legacy_upload_path)
+                .is_some_and(|legacy| roots_of(&legacy).iter().any(|root| is_under(path, root)))
     }
 
     fn is_mentionable_location(&self, path: &Path) -> bool {
@@ -142,6 +179,59 @@ impl FileAccessRules {
         self.mentionable_locations()
             .iter()
             .any(|location| is_under(actual, location) || resolve(location).is_some_and(|resolved| is_under(actual, &resolved)))
+    }
+}
+
+/// 一行對話紀錄中使用者 prompt 的文字裡認得的路徑(Claude 的 user 訊息字串或 text 區塊、Codex 的 user `input_text`)。
+/// 工具結果與 Agent 訊息不算;這些路徑只在上傳資料夾裡才會放行(`Grant::UserUpload`)。
+pub fn user_prompt_paths(line: &Value) -> Vec<String> {
+    let mut found = Vec::new();
+    for message in [line, &line["message"], &line["payload"]] {
+        if message["role"] != "user" {
+            continue;
+        }
+        match &message["content"] {
+            Value::String(text) => found.extend(host_path_mentions::paths(text)),
+            Value::Array(blocks) => {
+                for block in blocks {
+                    if matches!(block["type"].as_str(), Some("text" | "input_text")) {
+                        found.extend(block["text"].as_str().map(host_path_mentions::paths).unwrap_or_default());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// 比對路徑時用哪些寫法。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathForm {
+    /// 只看請求的寫法。
+    AsRequested,
+    /// 也看解析 symlink 後的實際位置(開檔後核對用)。
+    AlsoResolved,
+}
+
+/// `path` 在 `temporary` 的直接子資料夾(名稱是上傳資料夾)之下:`<temporary>/purrdr-uploads…/<檔案>`。
+fn is_in_direct_child_upload_folder(path: &Path, temporary: &Path) -> bool {
+    let path_keys = comparison_keys(path);
+    let temporary_keys = comparison_keys(temporary);
+    !temporary_keys.is_empty()
+        && path_keys.len() > temporary_keys.len() + 1
+        && path_keys.starts_with(&temporary_keys)
+        && is_upload_folder_name(&path_keys[temporary_keys.len()])
+}
+
+/// `purrdr-uploads`(Windows)或 `purrdr-uploads-<uid>`(Unix)。
+fn is_upload_folder_name(name: &str) -> bool {
+    match name.strip_prefix(UPLOAD_FOLDER) {
+        Some("") => true,
+        Some(rest) => rest
+            .strip_prefix('-')
+            .is_some_and(|uid| uid == "unknown" || (!uid.is_empty() && uid.chars().all(|c| c.is_ascii_digit()))),
+        None => false,
     }
 }
 
@@ -232,14 +322,25 @@ struct TranscriptMentions {
     /// 已處理到的位置(完整的行為止)。
     processed: u64,
     paths: HashSet<String>,
+    /// 使用者 prompt 裡的路徑(只用於上傳資料夾的放行)。
+    prompted_paths: HashSet<String>,
 }
 
 impl MentionIndex {
     fn mentions(&mut self, transcripts: &[PathBuf], requested: &str) -> bool {
+        self.any_transcript(transcripts, |mentions| mentions.paths.contains(requested))
+    }
+
+    fn prompted(&mut self, transcripts: &[PathBuf], requested: &str) -> bool {
+        self.any_transcript(transcripts, |mentions| mentions.prompted_paths.contains(requested))
+    }
+
+    /// 每份對話紀錄先讀到最新，再看有沒有任何一份符合。
+    fn any_transcript(&mut self, transcripts: &[PathBuf], matches: impl Fn(&TranscriptMentions) -> bool) -> bool {
         transcripts.iter().any(|transcript| {
             let mentions = self.transcripts.entry(transcript.clone()).or_default();
             mentions.catch_up(transcript);
-            mentions.paths.contains(requested)
+            matches(mentions)
         })
     }
 }
@@ -267,6 +368,7 @@ impl TranscriptMentions {
                     self.processed += count as u64;
                     if let Ok(value) = serde_json::from_slice::<Value>(&line) {
                         self.paths.extend(agent_written_paths(&value));
+                        self.prompted_paths.extend(user_prompt_paths(&value));
                     }
                 }
             }
@@ -365,7 +467,13 @@ pub(crate) enum Purpose {
 
 /// 套用存取規則、開檔並以 handle 核對實際路徑。會讀磁碟，在 blocking 執行緒呼叫。
 pub(crate) fn locate(requested: &str, rules: &FileAccessRules, cache: &mut FileAccessCache, purpose: Purpose) -> Located {
-    let Some(grant) = rules.grant(requested, || cache.mentions.mentions(&rules.transcripts, requested)) else {
+    let index = std::cell::RefCell::new(&mut cache.mentions);
+    let grant = rules.grant(
+        requested,
+        || index.borrow_mut().mentions(&rules.transcripts, requested),
+        || index.borrow_mut().prompted(&rules.transcripts, requested),
+    );
+    let Some(grant) = grant else {
         return Located::unavailable(FileStatus::Denied);
     };
     let actual = match std::fs::canonicalize(requested) {
@@ -404,6 +512,7 @@ fn resolved_is_allowed(actual: &Path, grant: &Grant, resolved: &FileAccessRules)
     match grant {
         Grant::WorkingDirectory(root) => resolve(root).is_some_and(|actual_root| !resolved.is_too_broad(&actual_root) && is_under(actual, &actual_root)),
         Grant::MentionedLocation => resolved.is_resolved_mentionable_location(actual),
+        Grant::UserUpload => resolved.is_upload_location(actual, PathForm::AlsoResolved),
     }
 }
 

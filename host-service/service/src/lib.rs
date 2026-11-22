@@ -29,6 +29,7 @@ mod pane_guard;
 mod pane_screen;
 mod pane_terminal;
 mod push_plugin;
+pub use push_plugin::{PluginUpdate, PluginUpdater};
 #[rustfmt::skip] // 由 codegen 產生。
 pub mod protocol;
 pub mod remote_management;
@@ -149,12 +150,19 @@ pub struct RunningHostService {
     observer: Option<tokio::task::JoinHandle<()>>,
     /// 直接送推播的 lease;停止時收回，外掛才會立刻接回。
     lease: Option<direct_push::Lease>,
+    /// 與服務共用 serial 鎖的外掛更新器(自動更新排程用)。
+    plugin_updater: PluginUpdater,
 }
 
 impl RunningHostService {
     /// 實際綁定的位址。
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    /// 與服務自己處理安裝／移除共用同一把鎖的外掛更新器。
+    pub fn plugin_updater(&self) -> PluginUpdater {
+        self.plugin_updater.clone()
     }
 
     /// 一直執行到接受連線的迴圈結束(正式執行用)。
@@ -198,6 +206,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
     let herdr = HerdrClient::new(config.herdr_socket);
     let push = push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()).with_observer(config.observer.is_some());
     // 主機服務直接送 blocked／done 與維護 lease(raychiutw/purrdr.host#48):需要觀察者與家目錄。
+    let plugin_updater = push.updater();
     let direct = config
         .observer
         .and(config.transcripts.home.as_deref())
@@ -239,5 +248,6 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         upload_cleanup,
         observer: observer.map(|(_, task)| task),
         lease,
+        plugin_updater,
     })
 }

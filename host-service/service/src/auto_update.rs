@@ -7,6 +7,7 @@ use crate::agent_activity::HerdrAgentActivity;
 use crate::herdr_socket::HerdrSocket;
 use crate::install::InstalledService;
 use crate::install::system::ProcessHostSystem;
+use crate::push_plugin::PluginUpdater;
 use crate::update::{AutomaticOutcome, HttpReleaseSource, UpdateError, Updater};
 
 const MINUTE: Duration = Duration::from_secs(60);
@@ -41,7 +42,7 @@ where
 }
 
 /// 執行中的是安裝好的主機服務時，在背景開始自動更新排程(`herdr_socket` 用來看 Agent 是否工作中)。
-pub fn spawn_for_installed_service(herdr_socket: HerdrSocket) -> Option<tokio::task::JoinHandle<()>> {
+pub fn spawn_for_installed_service(herdr_socket: HerdrSocket, plugin_updater: PluginUpdater) -> Option<tokio::task::JoinHandle<()>> {
     let environment = crate::install::HostEnvironment::from_process().ok()?;
     if !InstalledService::new(environment.clone(), ProcessHostSystem).runs_installed_copy() {
         return None;
@@ -49,6 +50,7 @@ pub fn spawn_for_installed_service(herdr_socket: HerdrSocket) -> Option<tokio::t
     let check = move || {
         let environment = environment.clone();
         let herdr_socket = herdr_socket.clone();
+        let plugin_updater = plugin_updater.clone();
         let runtime = tokio::runtime::Handle::current();
         async move {
             let checked = tokio::task::spawn_blocking(move || {
@@ -60,6 +62,11 @@ pub fn spawn_for_installed_service(herdr_socket: HerdrSocket) -> Option<tokio::t
             .await;
             let outcome = checked.unwrap_or_else(|error| AutomaticOutcome::Failed(UpdateError::Io(error.to_string())));
             println!("auto update: {outcome:?}");
+            // 外掛更新不影響主機服務自己的更新:只記 log。
+            match plugin_updater.update().await {
+                Ok(result) => println!("push plugin update: {result:?}"),
+                Err(error) => println!("push plugin update: failed: {error}"),
+            }
             outcome
         }
     };

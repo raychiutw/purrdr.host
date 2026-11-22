@@ -39,7 +39,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     }
     repair_command_alias(&log);
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
-    let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);
+    let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket, service.plugin_updater());
     service.wait().await;
     ExitCode::SUCCESS
 }

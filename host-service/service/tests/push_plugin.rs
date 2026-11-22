@@ -16,6 +16,7 @@ use std::pin::Pin;
 
 use install_support::push_backend::FakePushBackend;
 use purrdr_host_service::herdr_cli::HerdrCli;
+use purrdr_host_service::{PluginUpdate, PluginUpdater};
 use serde_json::{Value, json};
 use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_with_herdr_cli_and_home};
 use tempfile::TempDir;
@@ -55,6 +56,13 @@ fn fake_herdr(arguments: &[String]) -> i32 {
                 return 1;
             }
             std::fs::write(installed, b"").unwrap();
+            0
+        }
+        "plugin update purrdr.push --yes" => {
+            if directory.join("update-fails").exists() {
+                eprintln!("git pull failed");
+                return 1;
+            }
             0
         }
         "plugin uninstall purrdr.push" => {
@@ -607,6 +615,84 @@ async fn push_test_is_refused_for_read_only_devices_and_audited_without_the_key(
     assert!(!audit.contains(KEY), "{audit}");
 }
 
+// MARK: - 自動更新外掛(#76)
+
+/// 假 herdr 的資料夾:直接以 `fake-herdr <資料夾>` 當 herdr,不經主機服務。
+struct UpdateSetup {
+    fake: TempDir,
+    herdr: HerdrCli,
+}
+
+impl UpdateSetup {
+    fn new() -> UpdateSetup {
+        let fake = tempfile::tempdir().unwrap();
+        let herdr = HerdrCli::at_path(
+            std::env::current_exe().unwrap(),
+            vec![FAKE_HERDR.to_owned(), fake.path().to_string_lossy().into_owned()],
+        );
+        UpdateSetup { fake, herdr }
+    }
+
+    fn mark(&self, name: &str) {
+        std::fs::write(self.fake.path().join(name), b"").unwrap();
+    }
+
+    fn calls(&self) -> Vec<String> {
+        std::fs::read_to_string(self.fake.path().join("calls"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+async fn updating_an_installed_plugin_runs_herdr_plugin_update() {
+    let setup = UpdateSetup::new();
+    setup.mark("installed");
+
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
+
+    assert_eq!(result, Ok(PluginUpdate::Updated));
+    assert!(setup.calls().contains(&"plugin update purrdr.push --yes".to_owned()), "{:?}", setup.calls());
+}
+
+async fn updating_without_the_plugin_does_not_run_plugin_update() {
+    let setup = UpdateSetup::new();
+
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
+
+    assert_eq!(result, Ok(PluginUpdate::NotInstalled));
+    assert!(
+        !setup
+            .calls()
+            .iter()
+            .any(|call| call.contains("plugin update") || call.contains("plugin install")),
+        "沒裝外掛不更新也不代裝:{:?}",
+        setup.calls()
+    );
+}
+
+async fn a_failing_plugin_update_is_reported_with_herdrs_message() {
+    let setup = UpdateSetup::new();
+    setup.mark("installed");
+    setup.mark("update-fails");
+
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
+
+    assert_eq!(result, Err("git pull failed".to_owned()));
+}
+
+async fn failing_to_list_plugins_is_a_failure_and_does_not_update() {
+    let setup = UpdateSetup::new();
+    setup.mark("installed");
+    setup.mark("list-fails");
+
+    let result = PluginUpdater::standalone(setup.herdr.clone()).update().await;
+
+    assert_eq!(result, Err("herdr server is not running".to_owned()));
+    assert!(!setup.calls().iter().any(|call| call.contains("plugin update")), "{:?}", setup.calls());
+}
+
 // MARK: - 執行
 
 type TestCase = (&'static str, fn() -> Pin<Box<dyn Future<Output = ()>>>);
@@ -646,6 +732,18 @@ fn tests() -> Vec<TestCase> {
         }),
         ("reinstall_overwrites_the_key_without_reinstalling_the_plugin", || {
             Box::pin(reinstall_overwrites_the_key_without_reinstalling_the_plugin())
+        }),
+        ("updating_an_installed_plugin_runs_herdr_plugin_update", || {
+            Box::pin(updating_an_installed_plugin_runs_herdr_plugin_update())
+        }),
+        ("updating_without_the_plugin_does_not_run_plugin_update", || {
+            Box::pin(updating_without_the_plugin_does_not_run_plugin_update())
+        }),
+        ("a_failing_plugin_update_is_reported_with_herdrs_message", || {
+            Box::pin(a_failing_plugin_update_is_reported_with_herdrs_message())
+        }),
+        ("failing_to_list_plugins_is_a_failure_and_does_not_update", || {
+            Box::pin(failing_to_list_plugins_is_a_failure_and_does_not_update())
         }),
         ("update_muted_rewrites_only_muted_without_herdr", || {
             Box::pin(update_muted_rewrites_only_muted_without_herdr())

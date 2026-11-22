@@ -35,6 +35,32 @@ const PAIRING_NOT_FOUND: u16 = 404;
 /// 後台：這組配對已撤銷。
 const PAIRING_REVOKED: u16 = 410;
 
+/// 更新推播外掛的結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginUpdate {
+    /// 沒裝外掛:不代裝,什麼都不做。
+    NotInstalled,
+    /// `herdr plugin update` 成功。
+    Updated,
+}
+
+/// 自動更新排程用的外掛更新器。與服務本身共用同一把 serial 鎖(由 `PushPlugin::updater` 取得),
+/// 所以自動更新不會和 app 觸發的安裝／移除同時跑。
+#[derive(Debug, Clone)]
+pub struct PluginUpdater(PushPlugin);
+
+impl PluginUpdater {
+    /// 獨立的更新器(自己一把鎖)。只給沒有服務可共用的情況(測試);正式執行一律用服務的那份。
+    pub fn standalone(herdr: HerdrCli) -> Self {
+        PluginUpdater(PushPlugin::new(herdr, None))
+    }
+
+    /// 外掛有裝才更新(`herdr plugin update purrdr.push --yes`),失敗回 herdr 的訊息。
+    pub async fn update(&self) -> Result<PluginUpdate, String> {
+        self.0.update_plugin().await.map_err(|failure| failure.to_string())
+    }
+}
+
 /// Windows:不開 console 視窗(背景執行檔沒有 console)。
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -107,6 +133,20 @@ pub(crate) enum PushFailure {
     Internal(String),
 }
 
+impl std::fmt::Display for PushFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // InvalidRequest 帶 `&'static str`、其餘帶 `String`,型別不同不能併成同一個 or-pattern,所以先統一成 `&str`。
+        let message = match self {
+            PushFailure::InvalidRequest(message) => *message,
+            PushFailure::HerdrUnavailable(message) | PushFailure::Herdr(message) | PushFailure::SendFailed(message) | PushFailure::Internal(message) => {
+                message.as_str()
+            }
+            PushFailure::NotPaired => "not paired",
+        };
+        formatter.write_str(message)
+    }
+}
+
 impl From<std::io::Error> for PushFailure {
     fn from(error: std::io::Error) -> Self {
         PushFailure::Internal(error.to_string())
@@ -138,6 +178,11 @@ impl PushPlugin {
     pub fn with_observer(mut self, running: bool) -> Self {
         self.observer_running = running && self.home.is_some();
         self
+    }
+
+    /// 取得共用這份 serial 鎖的更新器。
+    pub fn updater(&self) -> PluginUpdater {
+        PluginUpdater(self.clone())
     }
 
     pub async fn status(&self, device_id: &str) -> Result<PushState, PushFailure> {
@@ -176,6 +221,18 @@ impl PushPlugin {
             }
         }
         self.state(device_id).await
+    }
+
+    /// 外掛有裝才更新到最新版;沒裝不代裝。
+    pub async fn update_plugin(&self) -> Result<PluginUpdate, PushFailure> {
+        let _serial = self.serial.lock().await;
+        if !self.plugin_presence().await?.installed() {
+            return Ok(PluginUpdate::NotInstalled);
+        }
+        // 與安裝一樣要下載,用較長的逾時;plugin update 對所有 session 生效,不帶 `--session`。
+        self.run(self.herdr.program_arguments(), &["plugin", "update", PLUGIN_ID, "--yes"], INSTALL_TIMEOUT)
+            .await?;
+        Ok(PluginUpdate::Updated)
     }
 
     /// 只改寫配對檔的靜音清單(保留 key 與 endpoint),不呼叫 herdr。
@@ -519,5 +576,21 @@ mod tests {
             !PushPlugin::new(herdr(), None).with_observer(true).observer_running,
             "沒有家目錄就沒有 lease，不能直接送"
         );
+    }
+
+    #[tokio::test]
+    async fn the_updater_waits_for_the_services_own_serial_lock() {
+        // 不存在的執行檔:鎖放開後 spawn 立刻失敗,不會碰到真的 herdr。
+        let missing = HerdrCli::at_path(PathBuf::from("/nonexistent/purrdr-test-herdr"), Vec::new());
+        let plugin = PushPlugin::new(missing, None);
+        let updater = plugin.updater();
+        let held = plugin.serial.lock().await;
+
+        let blocked = tokio::time::timeout(Duration::from_millis(200), updater.update()).await;
+        assert!(blocked.is_err(), "服務正在處理安裝／移除時，自動更新要等");
+
+        drop(held);
+        let finished = tokio::time::timeout(Duration::from_secs(5), updater.update()).await;
+        assert!(finished.is_ok(), "鎖放開後自動更新就能跑");
     }
 }

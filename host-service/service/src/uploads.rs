@@ -18,6 +18,11 @@ use crate::service_log::ServiceLog;
 /// 舊版家目錄底下的上傳資料夾。
 pub const LEGACY_UPLOAD_FOLDER: [&str; 2] = [".purrdr", "uploads"];
 
+/// 舊版上傳資料夾的完整路徑:`<家目錄>/.purrdr/uploads`。
+pub fn legacy_upload_path(home: &Path) -> PathBuf {
+    LEGACY_UPLOAD_FOLDER.iter().fold(home.to_owned(), |path, segment| path.join(segment))
+}
+
 /// 上傳檔保留多久(與 SSH 上傳的 `find -mmin +10080` 相同)。
 pub const RETENTION: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -76,7 +81,7 @@ impl UploadDirectory {
     /// 舊版家目錄的 `.purrdr/uploads/`(只清理、不寫入)。
     pub fn legacy_under_home(home: &Path) -> Self {
         UploadDirectory {
-            path: LEGACY_UPLOAD_FOLDER.iter().fold(home.to_owned(), |path, segment| path.join(segment)),
+            path: legacy_upload_path(home),
             #[cfg(unix)]
             owner: None,
             remove_when_empty: true,
