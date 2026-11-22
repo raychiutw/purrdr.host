@@ -21,6 +21,7 @@ use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
 use crate::claude_usage::ClaudeUsage;
 use crate::codex_usage::{self, CodexCli, CodexUsageFailure};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
+use crate::directory_list::{self, ListError};
 use crate::git_changes::{self, GitFailure};
 use crate::herdr_cli::HerdrCli;
 use crate::herdr_client::{HerdrClient, HerdrFailure, HerdrSubscription};
@@ -30,12 +31,13 @@ use crate::pane_guard::{self, GuardFailure};
 use crate::pane_screen;
 use crate::pane_terminal::{self, PaneTerminal};
 use crate::protocol::{
-    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, ErrorCode,
-    ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult, FileStat, FileStatResult, FileStatus,
-    FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus, GitStatusResult, HerdrServer,
-    PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult,
-    PushTestResult, QueueAdd, QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage,
-    SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, UsageCodexResult, Welcome, Workspace,
+    Agent, AgentPrompt, AgentPromptResult, AgentSession, AgentStatus, AgentsListResult, ClientMessage, DevicesListResult, DevicesRevokeResult, DirectoryList,
+    DirectoryListResult, ErrorCode, ErrorMessage, EventsEnded, EventsSubscribe, EventsSubscribeResult, EventsUnsubscribeResult, FileRead, FileReadResult,
+    FileStat, FileStatResult, FileStatus, FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus,
+    GitStatusResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen,
+    PaneTerminalOpenResult, PushTestResult, QueueAdd, QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder,
+    QueueReorderResult, ServerMessage, SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate,
+    UsageCodexResult, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
@@ -402,6 +404,7 @@ impl ClientConnection {
             }
             ClientMessage::FileStat(request) => self.file_stat(request, device).await,
             ClientMessage::FileRead(request) => self.file_read(request, device).await,
+            ClientMessage::DirectoryList(request) => self.directory_list(request).await,
             ClientMessage::PushStatus(request) => push_reply(request.request_id, self.push.status(&request.device_id).await, PushState::status_result),
             ClientMessage::PushInstall(request) => {
                 let outcome = self.push.pair(&request.device_id, &request.pairing).await;
@@ -821,6 +824,36 @@ impl ClientConnection {
         );
     }
 
+    /// 只回子資料夾名稱;排除與 symlink 規則在 `directory_list`。
+    async fn directory_list(&self, request: DirectoryList) -> ServerMessage {
+        let path = request.path.clone();
+        let state_directory = self.files.state_directory.clone();
+        match blocking(move || directory_list::list(&path, &state_directory)).await {
+            Ok(listing) => ServerMessage::DirectoryListResult(DirectoryListResult {
+                request_id: request.request_id,
+                path: request.path,
+                directories: listing.directories,
+                truncated: listing.truncated,
+            }),
+            Err(ListError::InvalidPath) => error(
+                Some(request.request_id),
+                ErrorCode::InvalidMessage,
+                "path must be an absolute path without . or .. segments",
+            ),
+            Err(ListError::NotFound) => error(
+                Some(request.request_id),
+                ErrorCode::DirectoryNotFound,
+                "path is not an existing folder on this host",
+            ),
+            Err(ListError::NotAllowed) => error(
+                Some(request.request_id),
+                ErrorCode::DirectoryNotAllowed,
+                "this folder is excluded from browsing",
+            ),
+            Err(ListError::Unreadable) => error(Some(request.request_id), ErrorCode::DirectoryUnreadable, "cannot read this folder"),
+        }
+    }
+
     async fn file_stat(&mut self, request: FileStat, device: &Device) -> ServerMessage {
         let located = match self.locate_file(&request.path, Purpose::Status).await {
             Ok(located) => located,
@@ -1048,6 +1081,7 @@ impl ClientConnection {
                 capabilities,
             },
             read_only,
+            home_directory: self.files.home.as_ref().map(|home| home.to_string_lossy().into_owned()),
         })
     }
 

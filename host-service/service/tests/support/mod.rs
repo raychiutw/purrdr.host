@@ -511,15 +511,35 @@ pub async fn http_request(service: &TestHostService, method: &str, path: &str, d
 }
 
 /// 同 `start_service`,另外啟動常駐的 Agent 觀察者;`state_directory` 給定時用它(重啟測試),`home` 是推播配對所在的家目錄。
+///
+/// herdr CLI 固定成找不到的程式:觀察者問「外掛裝了沒」時不會碰到這台機器真的 herdr(查不到就不直接送推播)。
 pub async fn start_service_with_observer(
     herdr_socket: HerdrSocket,
     state_directory: Option<PathBuf>,
     home: Option<PathBuf>,
     observer: ObserverOptions,
 ) -> TestHostService {
+    start_service_with_observer_and_cli(
+        herdr_socket,
+        HerdrCli::at_path(PathBuf::from("purrdr-test-no-such-herdr"), Vec::new()),
+        state_directory,
+        home,
+        observer,
+    )
+    .await
+}
+
+/// 同 `start_service_with_observer`,另外指定 herdr CLI(測試的假 herdr CLI,回報外掛裝了沒、什麼版本)。
+pub async fn start_service_with_observer_and_cli(
+    herdr_socket: HerdrSocket,
+    herdr_cli: HerdrCli,
+    state_directory: Option<PathBuf>,
+    home: Option<PathBuf>,
+    observer: ObserverOptions,
+) -> TestHostService {
     start_service_with_options(
         herdr_socket,
-        HerdrCli::search(None),
+        herdr_cli,
         Heartbeat::default(),
         TranscriptEnvironment {
             home,

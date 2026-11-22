@@ -24,6 +24,8 @@ fn manifest_declares_hooks() {
     let text = std::fs::read_to_string(plugin_directory().join("herdr-plugin.toml")).unwrap();
     let manifest: toml::Table = text.parse().unwrap();
     assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
+    // 0.2.0 起會讓位給主機服務的 lease(raychiutw/purrdr.host#48);主機服務靠這個版本號判斷舊 plugin 不能共存。
+    assert_eq!(manifest["version"].as_str(), Some("0.2.0"));
 
     let events = manifest["events"].as_array().expect("沒有 [[events]]");
     let hooks: Vec<(&str, Vec<&str>, Vec<&str>)> = events
@@ -198,8 +200,13 @@ fi
             self.path(&format!(".purrdr/push-{device}")).exists()
         }
 
-        /// 以 herdr 的方式執行外掛：新程序、帶事件環境變數。
+        /// 以 herdr 的方式執行外掛：新程序、帶事件環境變數(沒有 `HERDR_SOCKET_PATH`)。
         fn run_hook(&self, event: &str, context: &str) -> i32 {
+            self.run_hook_with_socket(event, context, None)
+        }
+
+        /// 同 `run_hook`,另外帶 herdr 注入的 `HERDR_SOCKET_PATH`。
+        fn run_hook_with_socket(&self, event: &str, context: &str, socket: Option<&str>) -> i32 {
             let bin = self.path("bin");
             let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap_or_default());
             let status = Command::new("sh")
@@ -213,6 +220,8 @@ fi
                 .env("HERDR_PLUGIN_EVENT_JSON", event)
                 .env("HERDR_PLUGIN_CONTEXT_JSON", context)
                 .env("HERDR_BIN_PATH", bin.join("herdr"))
+                .env_remove("HERDR_SOCKET_PATH")
+                .envs(socket.map(|socket| ("HERDR_SOCKET_PATH", socket)))
                 .status()
                 .unwrap();
             status.code().unwrap_or(-1)
@@ -503,6 +512,146 @@ fi
             assert!(host.is_paired("a1"), "{status} 不該刪配對");
         }
     }
+
+    // MARK: - 讓位給主機服務(raychiutw/purrdr.host#48)
+
+    /// 假的 herdr socket 路徑(只比對字串，不需要真的有 socket)。
+    fn socket_in(host: &Host) -> String {
+        let directory = host.path("herdr-config");
+        std::fs::create_dir_all(&directory).unwrap();
+        directory.join("herdr.sock").to_string_lossy().into_owned()
+    }
+
+    fn now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    impl Host {
+        /// 主機服務的 lease(`~/.purrdr/host-service/push-sender`):記觀察的 socket 與更新時間(Unix 秒)。
+        fn lease(&self, socket: &str, updated: u64) {
+            self.write(
+                ".purrdr/host-service/push-sender",
+                &format!("purrdr-lease 1\nsocket={socket}\nupdated={updated}\n"),
+            );
+        }
+    }
+
+    /// 主機服務持有新鮮、同一個 socket 的 lease:外掛讓位，不呼叫後台。
+    #[test]
+    fn fresh_lease_for_the_same_socket_makes_the_plugin_yield() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.lease(&socket, now());
+
+        assert_eq!(host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket)), 0);
+
+        assert!(host.curl_calls().is_empty(), "lease 新鮮、同 socket 時不該送");
+    }
+
+    /// 同一個 socket 經不同寫法(`..`、符號連結的資料夾)也算同一個。
+    #[test]
+    fn socket_paths_are_compared_after_canonicalizing() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        std::os::unix::fs::symlink(host.path("herdr-config"), host.path("config-link")).unwrap();
+        host.lease(&socket, now());
+        let spelled_differently = format!("{}/config-link/../herdr-config/herdr.sock", host.path("").display());
+
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&spelled_differently));
+        assert!(host.curl_calls().is_empty(), "..／符號連結的寫法應視為同一個 socket");
+
+        let linked = format!("{}/config-link/herdr.sock", host.path("").display());
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&linked));
+        assert!(host.curl_calls().is_empty(), "符號連結的資料夾應視為同一個 socket");
+    }
+
+    /// lease 過期(超過 120 秒沒更新，主機服務可能掛了):外掛接回。
+    #[test]
+    fn stale_lease_does_not_stop_the_plugin() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.lease(&socket, now() - 121);
+
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket));
+
+        assert_eq!(host.keys(), [key_a()]);
+    }
+
+    /// 剛好在門檻內(119 秒前)還算新鮮。
+    #[test]
+    fn lease_just_inside_the_window_still_counts() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.lease(&socket, now() - 100);
+
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket));
+
+        assert!(host.curl_calls().is_empty());
+    }
+
+    /// lease 觀察的是別的 herdr socket(另一個 session):這個事件主機服務不會送，外掛照送。
+    #[test]
+    fn lease_for_another_socket_does_not_stop_the_plugin() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.lease(&format!("{}-other", socket), now());
+
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket));
+
+        assert_eq!(host.keys(), [key_a()]);
+    }
+
+    /// herdr 沒給 `HERDR_SOCKET_PATH`:無法確認是同一個 socket，寧可重複也不漏推。
+    #[test]
+    fn missing_socket_environment_never_yields() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.lease(&socket_in(&host), now());
+
+        host.run_hook(&blocked(), &default_context());
+
+        assert_eq!(host.keys(), [key_a()]);
+    }
+
+    /// 壞掉的 lease(沒有 socket、時間不是數字、時間在未來)一律當作沒有。
+    #[test]
+    fn malformed_leases_are_ignored() {
+        let socket_text = |host: &Host| socket_in(host);
+        let cases: [fn(&str) -> String; 5] = [
+            |_| String::new(),
+            |socket| format!("socket={socket}\n"),
+            |socket| format!("socket={socket}\nupdated=yesterday\n"),
+            |_| format!("updated={}\n", now()),
+            |socket| format!("socket={socket}\nupdated={}\n", now() + 3600),
+        ];
+        for (index, contents) in cases.iter().enumerate() {
+            let host = Host::new();
+            host.pair("a1", &key_a(), &[]);
+            let socket = socket_text(&host);
+            host.write(".purrdr/host-service/push-sender", &contents(&socket));
+
+            host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket));
+
+            assert_eq!(host.keys(), [key_a()], "第 {index} 種壞 lease 不該讓位");
+        }
+    }
+
+    /// 沒有 lease(沒有主機服務，例如 SSH 主機):行為與 0.1.0 相同。
+    #[test]
+    fn without_a_lease_the_plugin_behaves_as_before() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+
+        host.run_hook_with_socket(&blocked(), &default_context(), Some(&socket));
+
+        assert_eq!(host.keys(), [key_a()]);
+    }
 }
 
 /// `notify.ps1` 的後台回應處理：真的以 Windows PowerShell 執行，後台換成本機的假 HTTP 伺服器。
@@ -626,7 +775,14 @@ mod notify_ps1 {
         }
 
         fn run_hook_with_status(&self, status: &str) -> i32 {
+            self.run_hook_with(status, None)
+        }
+
+        /// 同 `run_hook_with_status`,另外帶 herdr 注入的 `HERDR_SOCKET_PATH`。
+        fn run_hook_with(&self, status: &str, socket: Option<&str>) -> i32 {
             Command::new("powershell")
+                .env_remove("HERDR_SOCKET_PATH")
+                .envs(socket.map(|socket| ("HERDR_SOCKET_PATH", socket)))
                 .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
                 .arg(plugin_directory().join("notify.ps1"))
                 .env("USERPROFILE", self.home.path())
@@ -646,6 +802,50 @@ mod notify_ps1 {
 
     fn key_b() -> String {
         "cd".repeat(32)
+    }
+
+    fn write_lease(host: &Host, socket: &str, updated: u64) {
+        let directory = host.home.path().join(".purrdr").join("host-service");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("push-sender"), format!("purrdr-lease 1\nsocket={socket}\nupdated={updated}\n")).unwrap();
+    }
+
+    fn unix_now() -> u64 {
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+    }
+
+    /// 主機服務持有新鮮、同一個 socket 的 lease(只差大小寫與斜線方向):外掛讓位，不呼叫後台
+    #[test]
+    fn fresh_lease_for_the_same_socket_makes_the_plugin_yield() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        write_lease(&host, r"C:\Users\me\AppData\Roaming\herdr\herdr.sock", unix_now());
+
+        assert_eq!(host.run_hook_with("blocked", Some("c:/users/ME/appdata/roaming/herdr/herdr.sock")), 0);
+
+        assert!(backend.keys().is_empty());
+    }
+
+    /// lease 過期、socket 不同、沒有 HERDR_SOCKET_PATH:照送
+    #[test]
+    fn stale_other_or_unverifiable_lease_does_not_stop_the_plugin() {
+        let socket = r"C:\herdr\herdr.sock";
+        let cases: [(u64, &str, Option<&str>); 3] = [
+            (unix_now() - 121, socket, Some(socket)),
+            (unix_now(), r"C:\herdr\sessions\other\herdr.sock", Some(socket)),
+            (unix_now(), socket, None),
+        ];
+        for (updated, leased, environment) in cases {
+            let backend = Backend::start(HashMap::new());
+            let host = Host::new();
+            host.pair("a1", &key_a(), &backend.endpoint);
+            write_lease(&host, leased, updated);
+
+            host.run_hook_with("blocked", environment);
+
+            assert_eq!(backend.keys(), [key_a()], "{updated} {leased} {environment:?}");
+        }
     }
 
     /// 後台回 410(配對已撤銷):刪掉那支裝置的配對資料夾，其他裝置照送

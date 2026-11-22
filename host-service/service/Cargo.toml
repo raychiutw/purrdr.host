@@ -69,6 +69,11 @@ harness = false
 name = "push_plugin"
 harness = false
 
+# 假的 herdr CLI(plugin list／install／uninstall)是這支測試執行檔本身，所以不用 libtest。
+[[test]]
+name = "direct_push"
+harness = false
+
 [[test]]
 name = "codex_usage"
 harness = false

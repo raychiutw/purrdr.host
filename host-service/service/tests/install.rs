@@ -385,6 +385,21 @@ fn installing_again_updates_in_place_and_keeps_paired_devices() {
     }
 }
 
+/// raychiutw/purrdr.host#51:bootout 是非同步的，舊 job 還沒卸載完就 bootstrap 會回 error 5，服務因此停住。
+/// 重新安裝要等 job 卸載完再登記。
+#[test]
+fn macos_installing_again_waits_for_launchd_to_unload_the_old_job() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let mut system = FakeSystem::ready(&host.home.0);
+    system.bootout_lag = 3;
+    let mut installer = Installer::new(host.environment(), system);
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    assert!(installer.system().state.launchd_loaded.contains(LAUNCH_AGENT_LABEL));
+}
+
 #[test]
 fn installing_again_from_the_installed_copy_keeps_the_executables() {
     for platform in PLATFORMS {

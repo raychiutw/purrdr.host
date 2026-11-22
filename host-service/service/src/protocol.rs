@@ -68,6 +68,8 @@ pub enum ClientMessage {
     FileStat(FileStat),
     #[serde(rename = "file.read")]
     FileRead(FileRead),
+    #[serde(rename = "directory.list")]
+    DirectoryList(DirectoryList),
     #[serde(rename = "push.status")]
     PushStatus(PushStatus),
     #[serde(rename = "push.install")]
@@ -187,6 +189,8 @@ pub enum ServerMessage {
     PaneTerminalClosed(PaneTerminalClosed),
     #[serde(rename = "file.stat.result")]
     FileStatResult(FileStatResult),
+    #[serde(rename = "directory.list.result")]
+    DirectoryListResult(DirectoryListResult),
     #[serde(rename = "file.read.result")]
     FileReadResult(FileReadResult),
     #[serde(rename = "push.status.result")]
@@ -277,6 +281,9 @@ pub struct Welcome {
     pub herdr: HerdrServer,
     /// 這支裝置配對成唯讀：寫入類操作會被拒絕(read_only_device),app 停用輸入。
     pub read_only: bool,
+    /// 這台主機使用者家目錄的絕對路徑(0.12.0 起);主機找不到家目錄時省略。app 用它把 ~ 換成路徑、當作 directory.list 的起點;舊版主機沒有這個欄位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_directory: Option<String>,
 }
 
 /// herdr 伺服器(不是 CLI)的版本與能力。
@@ -1193,6 +1200,26 @@ pub struct EventsUnsubscribeResult {
     pub request_id: String,
 }
 
+/// 列出主機上一個資料夾裡的子資料夾名稱(0.12.0 起,raychiutw/purrdr.host#26):給 HTTPS 主機的新增聊天瀏覽資料夾。只回資料夾名稱，絕不回檔案或檔案內容。唯讀，唯讀裝置也可用。主機服務解析 symlink 後再比對排除清單(x-excluded-file-locations)與主機服務資料夾:資料夾本身在排除清單就拒絕(directory_not_allowed),排除的子項目不列出。資料夾不存在或不是資料夾回 directory_not_found,讀不了回 directory_unreadable,path 不是絕對路徑或含 . 或 .. 段落回 invalid_message。~ 由 app 以 welcome 的 home_directory 換成路徑，主機服務不展開。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryList {
+    pub request_id: String,
+    /// 主機上的絕對路徑(不可含 . 或 .. 段落)。
+    pub path: String,
+}
+
+/// 子資料夾名稱(0.12.0 起):含隱藏(點開頭)資料夾，不分大小寫排序;指向資料夾的 symlink 以解析後的目標判斷,目標在排除清單就不列。超過 1000 筆時只回前面的，truncated 為 true。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryListResult {
+    pub request_id: String,
+    /// 原樣回傳要求的 path(不解析 symlink)。
+    pub path: String,
+    /// 子資料夾的名稱(不含路徑)。
+    pub directories: Vec<String>,
+    /// 子資料夾多於上限，directories 只含排序後的前面一段。
+    pub truncated: bool,
+}
+
 /// 主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileStat {
@@ -1262,7 +1289,7 @@ pub struct PushStatus {
     pub device_id: String,
 }
 
-/// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
+/// 開啟這支裝置在這台主機的通知：寫入推播配對(與 SSH 路徑相同的 ~/.purrdr/push-<device_id>/pairing,已有就覆寫),外掛還沒安裝就以本機使用者身分執行 herdr plugin install raychiutw/purrdr.host/host-plugin --yes(來源固定，app 不能指定)。0.12.0 起主機服務能直接送推播(回覆的 direct_push 為 true)時只寫配對、不安裝外掛;主機服務不能接手(例如已裝舊版外掛 0.1.0)時行為不變。安裝失敗時還原成寫入前的樣子(原有的配對保留)並回 push_plugin_failed。重送一律代表「以這把 key 重新配對」(覆寫配對檔;外掛已裝就不重裝)。只改靜音請用 push.update_muted。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushInstall {
     pub request_id: String,
@@ -1271,7 +1298,7 @@ pub struct PushInstall {
     pub pairing: PushPairing,
 }
 
-/// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
+/// 關閉這支裝置在這台主機的通知：只移除這支裝置的配對資料夾;沒有其他裝置的配對、且外掛是 Purrdr 裝的(~/.purrdr/push-plugin/ 的紀錄)才執行 herdr plugin uninstall purrdr.push。主機服務直接送時沒有安裝紀錄，也就不會執行 uninstall。使用者自己裝的外掛不動。外掛移除失敗回 push_plugin_failed(配對已移除)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PushRemove {
     pub request_id: String,
@@ -1301,6 +1328,9 @@ pub struct PushStatusResult {
     pub paired: bool,
     /// 其他已配對裝置數(不含這支;不提供其他裝置的識別資訊)。
     pub other_devices: i64,
+    /// 0.12.0 起(選用;舊版主機服務沒有):主機服務會直接送 blocked／done 推播(Agent 觀察者執行中，且沒有裝會重複送的舊版外掛 purrdr.push 0.1.0)。true 時 push.install 不安裝外掛。沒有這個欄位等同 false。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_push: Option<bool>,
 }
 
 /// 開啟完成，帶完成後的推播狀態(欄位同 push.status.result)。
@@ -1310,6 +1340,9 @@ pub struct PushInstallResult {
     pub plugin_installed: bool,
     pub paired: bool,
     pub other_devices: i64,
+    /// 0.12.0 起(選用):同 push.status.result。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_push: Option<bool>,
 }
 
 /// 關閉完成，帶完成後的推播狀態(欄位同 push.status.result)。
@@ -1319,6 +1352,9 @@ pub struct PushRemoveResult {
     pub plugin_installed: bool,
     pub paired: bool,
     pub other_devices: i64,
+    /// 0.12.0 起(選用):同 push.status.result。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_push: Option<bool>,
 }
 
 /// 同步這支裝置在這台主機的靜音清單(app 不保存配對密鑰，不能重送 push.install):只以原子方式改寫配對檔的 muted 行，保留 key 與 endpoint,不呼叫 herdr。沒有配對檔回 push_not_paired;muted 含控制字元或空字串回 invalid_message。
@@ -1338,6 +1374,9 @@ pub struct PushUpdateMutedResult {
     pub plugin_installed: bool,
     pub paired: bool,
     pub other_devices: i64,
+    /// 0.12.0 起(選用):不問 herdr,所以這個回覆不帶這個欄位(要確認請用 push.status)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct_push: Option<bool>,
 }
 
 /// 送一則測試通知給這支裝置(raychiutw/purrdr.host#60,0.11.0 起):讀這支裝置的推播配對，對它的 endpoint 送 {key, event: test, host_name?}(後台 raychiutw/purrdr.server#19 組固定內容的通知，不受推播種類偏好影響、不去重)。只送給這支裝置，不經過主機外掛與 herdr。沒有配對、後台回 404 或 410 都回 push_not_paired(410 時刪掉這組配對，期間重新配對的不刪);連不上或後台回其他狀態碼回 push_send_failed。
@@ -1756,6 +1795,12 @@ pub enum ErrorCode {
     CwdNotAllowed,
     #[serde(rename = "not_git_repository")]
     NotGitRepository,
+    #[serde(rename = "directory_not_found")]
+    DirectoryNotFound,
+    #[serde(rename = "directory_not_allowed")]
+    DirectoryNotAllowed,
+    #[serde(rename = "directory_unreadable")]
+    DirectoryUnreadable,
     #[serde(rename = "queue_full")]
     QueueFull,
     #[serde(rename = "queue_item_unknown")]

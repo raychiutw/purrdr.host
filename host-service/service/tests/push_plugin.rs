@@ -185,11 +185,17 @@ fn remove(device_id: &str) -> Value {
     json!({"type": "push.remove", "request_id": "r1", "device_id": device_id})
 }
 
+/// 沒有 Agent 觀察者的主機服務(這支測試的預設):不會直接送，`direct_push` 是 false。
+/// 靜音更新不問 herdr,回覆不帶 `direct_push`。
 fn state(kind: &str, request_id: &str, plugin_installed: bool, paired: bool, other_devices: u64) -> Value {
-    json!({
+    let mut reply = json!({
         "type": kind, "request_id": request_id, "plugin_installed": plugin_installed,
         "paired": paired, "other_devices": other_devices,
-    })
+    });
+    if kind != "push.update_muted.result" {
+        reply["direct_push"] = json!(false);
+    }
+    reply
 }
 
 fn list_call(session: &str) -> String {

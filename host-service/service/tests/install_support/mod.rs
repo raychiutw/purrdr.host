@@ -191,6 +191,10 @@ pub struct FakeSystem {
     pub serve_denied: bool,
     /// launchctl／systemctl／reg 是否失敗(例如沒有 systemd user session)。
     pub autostart_fails: bool,
+    /// 模擬 launchd 的 bootout 是非同步的：bootout 後 `print` 還要再回報這麼多次「job 仍在」，期間 `bootstrap` 回 error 5。
+    pub bootout_lag: u32,
+    /// 還沒卸載完的 job 與剩餘的 `print` 次數。
+    pub unloading: Option<(String, u32)>,
     pub commands: Vec<String>,
     /// 等行程結束後才刪的資料夾(fake 會立刻刪)。
     pub deferred_removals: Vec<PathBuf>,
@@ -221,6 +225,8 @@ impl FakeSystem {
             https_certificates: true,
             serve_denied: false,
             autostart_fails: false,
+            bootout_lag: 0,
+            unloading: None,
             commands: Vec::new(),
             deferred_removals: Vec::new(),
             service_port: None,
@@ -350,6 +356,9 @@ impl FakeSystem {
             ["bootstrap", "gui/501", plist] => {
                 assert!(Path::new(plist).is_file(), "bootstrap 前 plist 要存在：{plist}");
                 let label = Path::new(plist).file_stem().unwrap().to_string_lossy().into_owned();
+                if self.unloading.as_ref().is_some_and(|(_, remaining)| *remaining > 0) {
+                    return failed("Bootstrap failed: 5: Input/output error\n");
+                }
                 self.state.launchd_loaded.insert(label);
                 self.start_service(&self.installed_executable());
                 ok("")
@@ -358,6 +367,9 @@ impl FakeSystem {
                 let label = target.trim_start_matches("gui/501/");
                 self.stop_service();
                 if self.state.launchd_loaded.remove(label) {
+                    if self.bootout_lag > 0 {
+                        self.unloading = Some((label.to_owned(), self.bootout_lag));
+                    }
                     ok("")
                 } else {
                     failed("Boot-out failed: 3: No such process\n")
@@ -374,6 +386,10 @@ impl FakeSystem {
             }
             ["print", target] => {
                 let label = target.trim_start_matches("gui/501/");
+                if let Some((_, remaining)) = self.unloading.as_mut().filter(|(unloading, remaining)| unloading == label && *remaining > 0) {
+                    *remaining -= 1;
+                    return ok("state = running\n");
+                }
                 if self.state.launchd_loaded.contains(label) {
                     ok("state = running\n")
                 } else {
