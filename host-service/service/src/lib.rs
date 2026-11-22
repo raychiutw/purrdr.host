@@ -13,6 +13,7 @@ pub mod auto_update;
 pub mod codex_usage;
 mod connection;
 pub mod device_store;
+mod directory_list;
 mod git_changes;
 pub mod herdr_cli;
 pub mod herdr_client;
