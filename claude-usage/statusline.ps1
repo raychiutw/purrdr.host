@@ -59,6 +59,9 @@ if ([IO.File]::Exists($original) -and (New-Object IO.FileInfo $original).Length 
         $start.FileName = 'powershell.exe'
         $start.Arguments = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Invoke-Expression $env:PURRDR_ORIGINAL_COMMAND"'
     }
+    # Windows PowerShell (.NET Framework) writes the child's stdin with Console.InputEncoding; its default UTF-8
+    # writes a BOM first, so the original status line would get a BOM before the JSON.
+    [Console]::InputEncoding = $utf8
     $process = [Diagnostics.Process]::Start($start)
     $bytes = $utf8.GetBytes($text + "`n")
     $process.StandardInput.BaseStream.Write($bytes, 0, $bytes.Length)
