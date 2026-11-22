@@ -18,7 +18,25 @@ use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_wi
 use tempfile::TempDir;
 
 const WRAPPER_SH: &str = include_str!("../../../claude-usage/statusline.sh");
-const WRAPPER_COMMAND: &str = "~/.purrdr/claude-usage/statusline.sh";
+const WRAPPER_PS1: &str = include_str!("../../../claude-usage/statusline.ps1");
+
+/// 這個平台的主機服務寫進 `statusLine.command` 的指令:Windows 是 PowerShell 版(家目錄的反斜線換成 `/`),其他是 `.sh` 版。
+fn expected_wrapper_command(home: &std::path::Path) -> String {
+    if cfg!(windows) {
+        let home = home.to_string_lossy().replace('\\', "/");
+        format!("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '{home}/.purrdr/claude-usage/statusline.ps1'")
+    } else {
+        "~/.purrdr/claude-usage/statusline.sh".to_owned()
+    }
+}
+
+/// 這個平台安裝的包裝腳本檔名(相對家目錄)與內容。
+const WRAPPER_FILE: &str = if cfg!(windows) {
+    ".purrdr/claude-usage/statusline.ps1"
+} else {
+    ".purrdr/claude-usage/statusline.sh"
+};
+const WRAPPER_SCRIPT: &str = if cfg!(windows) { WRAPPER_PS1 } else { WRAPPER_SH };
 
 // MARK: - 測試環境
 
@@ -103,6 +121,16 @@ impl Harness {
     fn exists(&self, relative: &str) -> bool {
         self.path(relative).exists()
     }
+
+    fn wrapper_command(&self) -> String {
+        expected_wrapper_command(self.home.path())
+    }
+
+    /// app(Foundation `JSONSerialization`,prettyPrinted + sortedKeys)寫的設定:鍵與值之間是 ` : `。
+    fn app_installed_settings(&self, extra_before: &str) -> String {
+        let command = self.wrapper_command();
+        format!("{{\n{extra_before}  \"statusLine\" : {{\n    \"command\" : \"{command}\",\n    \"type\" : \"command\"\n  }}\n}}\n")
+    }
 }
 
 fn state(kind: &str, request_id: &str, installed: bool, wrapper_active: bool, claude_found: bool) -> Value {
@@ -130,11 +158,6 @@ fn app_journal(original: Option<&str>, installed: &str) -> String {
     json!({"version": 1, "entries": [entry]}).to_string().replace('/', "\\/")
 }
 
-/// app(Foundation `JSONSerialization`,prettyPrinted + sortedKeys)寫的設定:鍵與值之間是 ` : `。
-fn app_installed_settings(extra_before: &str) -> String {
-    format!("{{\n{extra_before}  \"statusLine\" : {{\n    \"command\" : \"{WRAPPER_COMMAND}\",\n    \"type\" : \"command\"\n  }}\n}}\n")
-}
-
 // MARK: - 安裝
 
 #[tokio::test]
@@ -149,16 +172,13 @@ async fn install_on_settings_without_status_line_keeps_other_settings() {
     let settings = harness.settings();
     assert_eq!(settings["theme"], "dark");
     assert_eq!(settings["permissions"], json!({"allow": ["Bash(ls:*)"]}));
-    assert_eq!(settings["statusLine"], json!({"type": "command", "command": WRAPPER_COMMAND}));
-    assert_eq!(harness.read(".purrdr/claude-usage/statusline.sh").as_deref(), Some(WRAPPER_SH));
+    assert_eq!(settings["statusLine"], json!({"type": "command", "command": harness.wrapper_command()}));
+    assert_eq!(harness.read(WRAPPER_FILE).as_deref(), Some(WRAPPER_SCRIPT));
     assert!(!harness.exists(".purrdr/claude-usage/original-command"), "原本沒有 status line,沒有東西要存");
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(harness.path(".purrdr/claude-usage/statusline.sh"))
-            .unwrap()
-            .permissions()
-            .mode();
+        let mode = std::fs::metadata(harness.path(WRAPPER_FILE)).unwrap().permissions().mode();
         assert_ne!(mode & 0o100, 0, "包裝腳本要能執行:{mode:o}");
     }
     // 安裝紀錄是 app 的 HostWriteJournal:version、entries(path／original／installed 為 base64)。
@@ -180,7 +200,7 @@ async fn install_writes_settings_the_way_the_app_does() {
     harness.install().await;
 
     // 與 app(JSONSerialization prettyPrinted + sortedKeys + 結尾換行)同樣的排版:app 不必因排版不同而重寫。
-    assert_eq!(harness.read(".claude/settings.json").unwrap(), app_installed_settings(""));
+    assert_eq!(harness.read(".claude/settings.json").unwrap(), harness.app_installed_settings(""));
 }
 
 #[tokio::test]
@@ -196,7 +216,10 @@ async fn install_stores_the_existing_status_line_command_as_original() {
 
     assert_eq!(harness.read(".purrdr/claude-usage/original-command").as_deref(), Some(command));
     let settings = harness.settings();
-    assert_eq!(settings["statusLine"], json!({"type": "command", "command": WRAPPER_COMMAND, "padding": 2}));
+    assert_eq!(
+        settings["statusLine"],
+        json!({"type": "command", "command": harness.wrapper_command(), "padding": 2})
+    );
     assert_eq!(settings["model"], "opus");
 }
 
@@ -207,7 +230,10 @@ async fn install_without_settings_file_creates_it() {
     let reply = harness.install().await;
 
     assert_eq!(reply["type"], "claude_usage.install.result", "{reply}");
-    assert_eq!(harness.settings(), json!({"statusLine": {"type": "command", "command": WRAPPER_COMMAND}}));
+    assert_eq!(
+        harness.settings(),
+        json!({"statusLine": {"type": "command", "command": harness.wrapper_command()}})
+    );
     assert!(harness.journal()["entries"][0].get("original").is_none(), "原本不存在:紀錄沒有 original");
 
     // 還原:原本不存在就刪除,家目錄回到安裝前(.claude 是使用者的,保留)。
@@ -244,7 +270,7 @@ async fn reinstall_keeps_the_first_original_and_never_stores_the_wrapper() {
     assert_eq!(harness.read(".purrdr/claude-usage/original-command").as_deref(), Some("echo first"));
     assert_eq!(harness.journal()["entries"][0]["original"], journal_before["entries"][0]["original"]);
     assert_eq!(harness.journal()["entries"].as_array().unwrap().len(), 1, "同一個檔案只有一筆");
-    assert_eq!(harness.settings()["statusLine"]["command"], WRAPPER_COMMAND);
+    assert_eq!(harness.settings()["statusLine"]["command"], harness.wrapper_command());
     // 還原後回到第一次安裝前。
     harness.remove().await;
     assert_eq!(harness.read(".claude/settings.json").as_deref(), Some(first));
@@ -254,7 +280,7 @@ async fn reinstall_keeps_the_first_original_and_never_stores_the_wrapper() {
 #[tokio::test]
 async fn install_over_an_existing_wrapper_without_journal_does_not_store_it_as_original() {
     let harness = Harness::start().await;
-    harness.write(".claude/settings.json", &app_installed_settings(""));
+    harness.write(".claude/settings.json", &harness.app_installed_settings(""));
 
     let reply = harness.install().await;
 
@@ -331,19 +357,42 @@ async fn read_only_device_cannot_install_or_remove_but_can_read_status() {
 }
 
 #[tokio::test]
-async fn install_honors_claude_config_dir_and_records_a_home_relative_path() {
+async fn install_ignores_claude_config_dir_and_always_uses_the_home_settings_like_the_app() {
     let harness = Harness::start_bare(Some("elsewhere/claude")).await;
-    harness.write("elsewhere/claude/settings.json", "{\"theme\":\"dark\"}");
+    harness.write("elsewhere/claude/settings.json", "{\"theme\":\"light\"}");
+    harness.write(".claude/settings.json", "{\"theme\":\"dark\"}");
 
     let reply = harness.install().await;
 
     assert_eq!(reply["type"], "claude_usage.install.result", "{reply}");
-    assert!(!harness.exists(".claude"), "預設位置不動");
-    let settings: Value = serde_json::from_str(&harness.read("elsewhere/claude/settings.json").unwrap()).unwrap();
-    assert_eq!(settings["statusLine"]["command"], WRAPPER_COMMAND);
-    assert_eq!(harness.journal()["entries"][0]["path"], "elsewhere/claude/settings.json");
+    assert_eq!(
+        harness.read("elsewhere/claude/settings.json").as_deref(),
+        Some("{\"theme\":\"light\"}"),
+        "CLAUDE_CONFIG_DIR 不動"
+    );
+    assert_eq!(harness.settings()["statusLine"]["command"], harness.wrapper_command());
+    assert_eq!(harness.journal()["entries"][0]["path"], ".claude/settings.json");
     harness.remove().await;
-    assert_eq!(harness.read("elsewhere/claude/settings.json").as_deref(), Some("{\"theme\":\"dark\"}"));
+    assert_eq!(harness.read(".claude/settings.json").as_deref(), Some("{\"theme\":\"dark\"}"));
+}
+
+#[tokio::test]
+async fn reinstall_after_the_user_replaced_the_status_line_takes_the_new_one_as_original() {
+    let harness = Harness::start().await;
+    harness.write(".claude/settings.json", "{\"statusLine\":{\"type\":\"command\",\"command\":\"echo first\"}}");
+    harness.install().await;
+    harness.write(".claude/settings.json", "{\"statusLine\":{\"type\":\"command\",\"command\":\"echo mine\"}}");
+
+    let reinstall = harness.install().await;
+
+    assert_eq!(reinstall["type"], "claude_usage.install.result", "{reinstall}");
+    assert_eq!(harness.read(".purrdr/claude-usage/original-command").as_deref(), Some("echo mine"));
+    harness.remove().await;
+    assert_eq!(
+        harness.settings()["statusLine"]["command"],
+        "echo mine",
+        "手動改的 status line 不會在還原時消失"
+    );
 }
 
 // MARK: - 狀態
@@ -509,10 +558,10 @@ async fn remove_restores_an_install_made_by_the_app_over_ssh() {
     let harness = Harness::start().await;
     let original = "{\n  \"statusLine\": { \"type\": \"command\", \"command\": \"~/old/line.sh\" },\n  \"theme\": \"dark\"\n}\n";
     // app 裝出來的設定、紀錄、包裝與原本的指令。
-    let installed = app_installed_settings("  \"theme\" : \"dark\",\n");
+    let installed = harness.app_installed_settings("  \"theme\" : \"dark\",\n");
     harness.write(".claude/settings.json", &installed);
     harness.write(".purrdr/claude-usage/journal.json", &app_journal(Some(original), &installed));
-    harness.write(".purrdr/claude-usage/statusline.sh", "#!/bin/sh\n");
+    harness.write(WRAPPER_FILE, "#!/bin/sh\n");
     harness.write(".purrdr/claude-usage/original-command", "~/old/line.sh");
     harness.write(".purrdr/claude-usage/usage.json", "{}");
     assert_eq!(harness.status().await, state("claude_usage.status.result", "s1", true, true, true));
@@ -528,8 +577,8 @@ async fn remove_restores_an_install_made_by_the_app_over_ssh() {
 async fn remove_merges_an_app_install_the_user_edited_afterwards() {
     let harness = Harness::start().await;
     let original = "{\"statusLine\":{\"type\":\"command\",\"command\":\"~/old/line.sh\"}}";
-    let installed = app_installed_settings("");
-    harness.write(".claude/settings.json", &app_installed_settings("  \"model\" : \"opus\",\n"));
+    let installed = harness.app_installed_settings("");
+    harness.write(".claude/settings.json", &harness.app_installed_settings("  \"model\" : \"opus\",\n"));
     harness.write(".purrdr/claude-usage/journal.json", &app_journal(Some(original), &installed));
 
     harness.remove().await;
@@ -544,7 +593,7 @@ async fn remove_merges_an_app_install_the_user_edited_afterwards() {
 #[tokio::test]
 async fn remove_deletes_settings_the_app_created_and_nothing_else() {
     let harness = Harness::start().await;
-    let installed = app_installed_settings("");
+    let installed = harness.app_installed_settings("");
     harness.write(".claude/settings.json", &installed);
     harness.write(".purrdr/claude-usage/journal.json", &app_journal(None, &installed));
 
@@ -557,7 +606,7 @@ async fn remove_deletes_settings_the_app_created_and_nothing_else() {
 #[tokio::test]
 async fn remove_ignores_unknown_journal_fields_and_removes_created_directories_when_empty() {
     let harness = Harness::start_bare(None).await;
-    let installed = app_installed_settings("");
+    let installed = harness.app_installed_settings("");
     let journal = json!({
         "version": 1,
         "entries": [{"path": ".claude/settings.json", "installed": encoded(&installed)}],
@@ -724,6 +773,23 @@ async fn usage_omits_windows_whose_reset_time_has_passed() {
 }
 
 #[tokio::test]
+async fn usage_with_an_absurdly_large_reset_time_does_not_panic() {
+    let harness = Harness::start().await;
+    harness.install().await;
+    harness.write(
+        ".purrdr/claude-usage/usage.json",
+        r#"{"captured_at": 1e30, "status_line_input": {"rate_limits": {"five_hour": {"used_percentage": 10, "resets_at": 1e30}}}}"#,
+    );
+
+    let reply = harness.send(json!({"type": "usage.claude", "request_id": "u1"})).await;
+
+    assert_eq!(reply["type"], "usage.claude.result", "{reply}");
+    assert!(reply.get("captured_at").is_none(), "{reply}");
+    assert_eq!(reply["periods"][0]["used_percentage"], 10.0, "{reply}");
+    assert!(reply["periods"][0].get("resets_at").is_none(), "{reply}");
+}
+
+#[tokio::test]
 async fn usage_with_a_corrupt_file_is_empty_not_an_error() {
     let harness = Harness::start().await;
     harness.install().await;
@@ -804,44 +870,36 @@ async fn session_context_returns_each_requested_session_in_request_order() {
 }
 
 #[tokio::test]
-async fn session_context_without_ids_lists_valid_files_newest_first() {
+async fn session_context_requires_a_non_empty_list_of_at_most_50_ids() {
     let harness = Harness::start().await;
-    write_session(&harness, "old", now() - 500, json!({"used_percentage": 10}));
-    write_session(&harness, "new", now() - 5, json!({"used_percentage": 20}));
-    harness.write(".purrdr/claude-usage/sessions/.tmp.abc123", "{}");
-    harness.write(
-        ".purrdr/claude-usage/sessions/bad name.json",
-        &session_file("bad name", now(), json!({"used_percentage": 1})),
-    );
-    harness.write(".purrdr/claude-usage/sessions/broken.json", "{ half");
-    harness.write(
-        ".purrdr/claude-usage/sessions/no-context.json",
-        &json!({"captured_at": now() - 1, "status_line_input": {}}).to_string(),
-    );
+    write_session(&harness, "abc", now(), json!({"used_percentage": 1}));
+    let fifty: Vec<String> = (0..50).map(|index| format!("s{index}")).collect();
+    let fifty_one: Vec<String> = (0..51).map(|index| format!("s{index}")).collect();
 
-    let reply = harness.send(json!({"type": "usage.session_context", "request_id": "c1"})).await;
-
-    let ids: Vec<&str> = reply["sessions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|session| session["session_id"].as_str().unwrap())
-        .collect();
-    assert_eq!(ids, ["no-context", "new", "old"], "壞檔、暫存檔、不合規則的檔名略過;{reply}");
-    assert!(reply["sessions"][0].get("used_percentage").is_none());
+    for (label, message) in [
+        ("省略", json!({"type": "usage.session_context", "request_id": "c1"})),
+        ("空陣列", json!({"type": "usage.session_context", "request_id": "c1", "session_ids": []})),
+        ("51 個", json!({"type": "usage.session_context", "request_id": "c1", "session_ids": fifty_one})),
+    ] {
+        let reply = harness.send(message).await;
+        assert_eq!(reply["type"], "error", "{label}: {reply}");
+        assert_eq!(reply["code"], "invalid_message", "{label}: {reply}");
+    }
+    let reply = harness
+        .send(json!({"type": "usage.session_context", "request_id": "c2", "session_ids": fifty}))
+        .await;
+    assert_eq!(reply["type"], "usage.session_context.result", "50 個合法:{reply}");
 }
 
 #[tokio::test]
 async fn session_context_without_a_folder_is_empty() {
     let harness = Harness::start_bare(None).await;
 
-    let all = harness.send(json!({"type": "usage.session_context", "request_id": "c1"})).await;
     let some = harness
         .send(json!({"type": "usage.session_context", "request_id": "c2", "session_ids": ["abc"]}))
         .await;
 
-    assert_eq!(all, json!({"type": "usage.session_context.result", "request_id": "c1", "sessions": []}));
-    assert_eq!(some["sessions"], json!([]));
+    assert_eq!(some, json!({"type": "usage.session_context.result", "request_id": "c2", "sessions": []}));
 }
 
 #[tokio::test]
@@ -909,8 +967,6 @@ async fn session_context_never_follows_symlinks_out_of_the_folder() {
     let named = harness
         .send(json!({"type": "usage.session_context", "request_id": "c1", "session_ids": ["link"]}))
         .await;
-    let listed = harness.send(json!({"type": "usage.session_context", "request_id": "c2"})).await;
 
     assert_eq!(named["sessions"], json!([]), "{named}");
-    assert_eq!(listed["sessions"], json!([]), "{listed}");
 }

@@ -297,7 +297,7 @@ impl Drop for ClientConnection {
 impl ClientConnection {
     /// Claude 方案用量:位置只由家目錄與 `CLAUDE_CONFIG_DIR` 決定，app 不能指定路徑。
     fn claude_usage(&self) -> ClaudeUsage {
-        ClaudeUsage::new(self.transcript_environment.home.clone(), self.transcript_environment.claude_config_dir.clone())
+        ClaudeUsage::new(self.transcript_environment.home.clone())
     }
 
     async fn handle(&mut self, text: &str, device: &Device) {

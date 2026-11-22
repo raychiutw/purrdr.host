@@ -2,7 +2,9 @@
 //!
 //! 去重靠 lease:主機服務在 `~/.purrdr/host-service/push-sender` 記下它觀察的 herdr socket 與更新時間(Unix 秒),
 //! 約每 30 秒更新(跟著觀察者的檢查週期);主機外掛 0.2.0 看到新鮮(120 秒內)且同一個 socket 的 lease 就讓位。
-//! 主機服務掛掉或 herdr 訂閱斷掉時 lease 被刪或過期，外掛自動接回。
+//! 主機服務掛掉或 herdr 訂閱斷掉時 lease 被刪或過期，**已安裝**的外掛會自動接回。
+//! 沒有安裝外掛(主機服務直接送時 `push.install` 不再代裝)的話沒有人接手:主機服務沒在執行期間就不會有推播。
+//! 直接送需要觀察者在執行且知道家目錄(lease 寫在家目錄底下);少了任一個就不直接送，`push.install` 照常裝外掛。
 //!
 //! 已安裝的外掛是 0.1.0(沒有讓位邏輯)時主機服務不接手、不寫 lease:偵測方式是 `herdr plugin list --plugin purrdr.push --json`
 //! 的 `version`(與代裝外掛用的同一支已允許的 herdr 子指令，沒有新增任何會執行的 herdr 指令)。

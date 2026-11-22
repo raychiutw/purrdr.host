@@ -32,11 +32,13 @@ const POWERSHELL_WRAPPER: &str = include_str!("../../../claude-usage/statusline.
 /// 寫進 `statusLine.command` 的指令(Claude Code 以 shell 執行，`~` 會展開;同 app 的 `wrapperCommand`)。
 const SHELL_COMMAND: &str = "~/.purrdr/claude-usage/statusline.sh";
 const POWERSHELL_SCRIPT: &str = ".purrdr/claude-usage/statusline.ps1";
+/// 安裝紀錄裡設定檔的路徑(相對家目錄,同 app)。
+const SETTINGS_KEY: &str = ".claude/settings.json";
 const FEATURE_DIRECTORY: &str = ".purrdr/claude-usage";
 /// 單一用量檔的大小上限(status line 輸入通常不到 10 KB)。
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 /// `usage.session_context` 一次最多的 session 數。
-pub(crate) const MAX_SESSIONS: usize = 200;
+pub(crate) const MAX_SESSIONS: usize = 50;
 
 /// 同一時間只處理一個安裝或還原(兩支裝置同時按時不會交錯)。
 static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -89,7 +91,7 @@ fn journal_version() -> i64 {
     1
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct JournalEntry {
     #[serde(with = "base64_bytes")]
     installed: Vec<u8>,
@@ -243,7 +245,11 @@ fn write_atomically(path: &Path, contents: &[u8], executable: bool) -> std::io::
         fs::create_dir_all(directory)?;
     }
     let name = target.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default();
-    let temporary = target.with_file_name(format!(".{name}.purrdr-tmp"));
+    // 每次寫入各用自己的暫存檔名(行程 id 加隨機字尾):同時有兩個寫入也不會互相覆蓋或誤刪對方的暫存檔。
+    let mut suffix = [0u8; 8];
+    getrandom::fill(&mut suffix).map_err(|error| std::io::Error::other(error.to_string()))?;
+    let suffix: String = suffix.iter().map(|byte| format!("{byte:02x}")).collect();
+    let temporary = target.with_file_name(format!(".{name}.{}.{suffix}.purrdr-tmp", std::process::id()));
     let written = (|| {
         fs::write(&temporary, contents)?;
         if let Ok(existing) = fs::metadata(&target) {
@@ -288,7 +294,6 @@ fn changed(path: &Path) -> ClaudeUsageFailure {
 #[derive(Debug, Clone)]
 pub(crate) struct ClaudeUsage {
     home: Option<PathBuf>,
-    claude_config_dir: Option<PathBuf>,
     /// Windows 主機:包裝是 PowerShell 版。
     windows: bool,
 }
@@ -300,12 +305,8 @@ struct Inspection {
 }
 
 impl ClaudeUsage {
-    pub fn new(home: Option<PathBuf>, claude_config_dir: Option<PathBuf>) -> Self {
-        ClaudeUsage {
-            home,
-            claude_config_dir,
-            windows: cfg!(windows),
-        }
+    pub fn new(home: Option<PathBuf>) -> Self {
+        ClaudeUsage { home, windows: cfg!(windows) }
     }
 
     fn home(&self) -> Result<&Path, ClaudeUsageFailure> {
@@ -318,31 +319,14 @@ impl ClaudeUsage {
         Ok(self.home()?.join(FEATURE_DIRECTORY))
     }
 
-    /// Claude Code 的設定資料夾:`CLAUDE_CONFIG_DIR`,沒設定是 `~/.claude`。
+    /// Claude Code 的設定資料夾:固定 `~/.claude`(同 app 的 `ClaudePlanUsageHost.settingsPath`,不看 `CLAUDE_CONFIG_DIR`),
+    /// 安裝紀錄裡的路徑因此永遠是相對家目錄的 `.claude/settings.json`,app 才還原得了。
     fn config_directory(&self) -> Result<PathBuf, ClaudeUsageFailure> {
-        Ok(self
-            .claude_config_dir
-            .clone()
-            .unwrap_or_else(|| self.home.clone().unwrap_or_default().join(".claude")))
+        Ok(self.home()?.join(".claude"))
     }
 
     fn settings_path(&self) -> Result<PathBuf, ClaudeUsageFailure> {
-        self.home()?;
         Ok(self.config_directory()?.join("settings.json"))
-    }
-
-    /// 安裝紀錄裡的路徑:相對家目錄(app 的 `HostPath`,以 `/` 分隔);設定資料夾在家目錄外時是絕對路徑。
-    fn journal_key(&self, settings: &Path) -> Result<String, ClaudeUsageFailure> {
-        let text = |path: &Path| {
-            path.components()
-                .map(|component| component.as_os_str().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-                .join("/")
-        };
-        match settings.strip_prefix(self.home()?) {
-            Ok(relative) => Ok(text(relative)),
-            Err(_) => Ok(settings.to_string_lossy().replace('\\', "/")),
-        }
     }
 
     /// 這台主機要寫的包裝指令(Windows 用 PowerShell 版,家目錄以 `/` 分隔;同 app 的 `wrapperCommand(for:home:)`)。
@@ -392,7 +376,7 @@ impl ClaudeUsage {
     pub async fn install(&self) -> Result<ClaudeUsageState, ClaudeUsageFailure> {
         let _serial = SERIAL.lock().await;
         let settings_path = self.settings_path()?;
-        let key = self.journal_key(&settings_path)?;
+        let key = SETTINGS_KEY.to_owned();
         let inspection = self.inspect()?;
         let mut settings = match &inspection.settings {
             FileState::MissingDirectory => return Err(ClaudeUsageFailure::ClaudeNotFound),
@@ -404,10 +388,14 @@ impl ClaudeUsage {
                 ));
             }
         };
-        // 安裝前的內容:有安裝紀錄就用紀錄裡的(重複安裝不會把安裝後的內容當成原本的)。
+        // 安裝前的內容:包裝仍在用、且有安裝紀錄,就沿用紀錄裡的(重複安裝不會把安裝後的內容當成原本的)。
+        // 使用者在安裝後自己換掉 status line(目前的不是包裝)就當作全新安裝:以目前的設定為原本的,
+        // 否則還原時會把使用者手動改的 status line 蓋回第一次安裝前的樣子。
+        let wrapper_active = is_wrapper(status_line_command(inspection.settings.contents()).as_deref());
         let recorded = inspection
             .journal
             .as_ref()
+            .filter(|_| wrapper_active)
             .and_then(|journal| journal.entries.iter().find(|entry| entry.path == key));
         let original: Option<Vec<u8>> = match recorded {
             Some(entry) => entry.original.clone(),
@@ -425,7 +413,7 @@ impl ClaudeUsage {
         let mut entries: Vec<JournalEntry> = inspection
             .journal
             .as_ref()
-            .map(|journal| journal.entries.iter().filter(|entry| entry.path != key).map(clone_entry).collect())
+            .map(|journal| journal.entries.iter().filter(|entry| entry.path != key).cloned().collect())
             .unwrap_or_default();
         entries.push(JournalEntry {
             installed: installed.clone(),
@@ -519,18 +507,14 @@ impl ClaudeUsage {
         safe.then(|| self.home.as_ref().map(|home| home.join(path))).flatten()
     }
 
-    /// 安裝紀錄裡的路徑換成要還原的檔案:只能是 Claude 的 `settings.json`(目前的,或家目錄底下的相對路徑)。
+    /// 安裝紀錄裡的路徑換成要還原的檔案:只能是相對家目錄的 `.claude/settings.json`。
     fn entry_path(&self, text: &str) -> Result<PathBuf, ClaudeUsageFailure> {
-        let settings = self.settings_path()?;
-        if self.journal_key(&settings)? == text {
-            return Ok(settings);
+        if text == SETTINGS_KEY {
+            return self.settings_path();
         }
-        match self.relative_path(text) {
-            Some(path) if path.file_name().is_some_and(|name| name == "settings.json") => Ok(path),
-            _ => Err(ClaudeUsageFailure::WriteFailed(
-                "the install journal names a file that is not Claude's settings.json".to_owned(),
-            )),
-        }
+        Err(ClaudeUsageFailure::WriteFailed(
+            "the install journal names a file that is not Claude's settings.json".to_owned(),
+        ))
     }
 
     // MARK: - 協定
@@ -547,7 +531,7 @@ impl ClaudeUsage {
                 }),
                 Err(failure) => failure_reply(request.request_id, failure),
             },
-            ClientMessage::UsageSessionContext(request) => match self.session_context(request.session_ids.as_deref()) {
+            ClientMessage::UsageSessionContext(request) => match self.session_context(&request.session_ids) {
                 Ok(sessions) => ServerMessage::UsageSessionContextResult(UsageSessionContextResult {
                     request_id: request.request_id,
                     sessions,
@@ -614,34 +598,22 @@ impl ClaudeUsage {
             periods.push(PlanUsagePeriod {
                 kind,
                 used_percentage: used.clamp(0.0, 100.0),
-                resets_at: resets.map(format_time),
+                resets_at: resets.and_then(format_time),
             });
         }
         Ok(PlanUsage {
             installed,
-            captured_at: epoch_seconds(&file["captured_at"]).map(format_time),
+            captured_at: epoch_seconds(&file["captured_at"]).and_then(format_time),
             periods,
         })
     }
 
-    /// 每個 session 的 context(`sessions/<session_id>.json`)。`None`:資料夾裡全部(新到舊)。
-    pub fn session_context(&self, session_ids: Option<&[String]>) -> Result<Vec<SessionContext>, ClaudeUsageFailure> {
+    /// 每個 session 的 context(`sessions/<session_id>.json`),依請求順序;一次 1–50 個。
+    pub fn session_context(&self, ids: &[String]) -> Result<Vec<SessionContext>, ClaudeUsageFailure> {
         let sessions = self.directory()?.join("sessions");
-        let Some(ids) = session_ids else {
-            let mut found: Vec<(f64, SessionContext)> = fs::read_dir(&sessions)
-                .into_iter()
-                .flatten()
-                .flatten()
-                .filter_map(|entry| {
-                    let name = entry.file_name().to_string_lossy().into_owned();
-                    let id = name.strip_suffix(".json").filter(|id| is_valid_session_id(id))?.to_owned();
-                    read_session(&sessions, &id)
-                })
-                .collect();
-            found.sort_by(|left, right| right.0.total_cmp(&left.0));
-            found.truncate(MAX_SESSIONS);
-            return Ok(found.into_iter().map(|(_, session)| session).collect());
-        };
+        if ids.is_empty() {
+            return Err(ClaudeUsageFailure::InvalidRequest("session_ids must not be empty"));
+        }
         if ids.len() > MAX_SESSIONS {
             return Err(ClaudeUsageFailure::InvalidRequest("too many session_ids"));
         }
@@ -662,14 +634,6 @@ fn failure_reply(request_id: String, failure: ClaudeUsageFailure) -> ServerMessa
         ClaudeUsageFailure::SettingsNotJson => error(request_id, ErrorCode::ClaudeSettingsNotJson, "Claude settings.json is not a valid JSON object"),
         ClaudeUsageFailure::WriteFailed(message) => error(request_id, ErrorCode::HostWriteFailed, &message),
         ClaudeUsageFailure::Internal(message) => error(request_id, ErrorCode::InternalError, &message),
-    }
-}
-
-fn clone_entry(entry: &JournalEntry) -> JournalEntry {
-    JournalEntry {
-        installed: entry.installed.clone(),
-        original: entry.original.clone(),
-        path: entry.path.clone(),
     }
 }
 
@@ -709,14 +673,18 @@ fn epoch_seconds(value: &Value) -> Option<f64> {
     value.as_f64().filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
 }
 
-fn format_time(seconds: f64) -> String {
-    humantime::format_rfc3339_seconds(UNIX_EPOCH + Duration::from_secs(seconds as u64)).to_string()
+/// 轉成 RFC 3339;`SystemTime` 表示不了的時間(例如 `1e30`)當作沒有,不 panic。
+fn format_time(seconds: f64) -> Option<String> {
+    let time = UNIX_EPOCH.checked_add(Duration::from_secs(seconds as u64))?;
+    // humantime 只格式化到年 9999 之前;超過一樣當作沒有。
+    (time <= UNIX_EPOCH + Duration::from_secs(253_402_300_799)).then(|| humantime::format_rfc3339_seconds(time).to_string())
 }
 
 /// 一個 session 檔;回傳 captured_at(排序用)與內容。
 fn read_session(directory: &Path, id: &str) -> Option<(f64, SessionContext)> {
     let file = read_json_file(&directory.join(format!("{id}.json")))?;
     let captured = epoch_seconds(&file["captured_at"])?;
+    let captured_at = format_time(captured)?;
     let context = &file["status_line_input"]["context_window"];
     let size = context["context_window_size"].as_i64().or_else(|| {
         context["context_window_size"]
@@ -728,7 +696,7 @@ fn read_session(directory: &Path, id: &str) -> Option<(f64, SessionContext)> {
         captured,
         SessionContext {
             session_id: id.to_owned(),
-            captured_at: format_time(captured),
+            captured_at,
             used_percentage: context["used_percentage"]
                 .as_f64()
                 .filter(|used| used.is_finite())
@@ -746,7 +714,6 @@ mod tests {
     fn windows_hosts_use_the_powershell_command_form_of_the_app() {
         let usage = ClaudeUsage {
             home: Some(PathBuf::from("C:\\Users\\ray")),
-            claude_config_dir: None,
             windows: true,
         };
 
@@ -780,5 +747,28 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), "changed by someone else");
         assert!(write_unless_changed(&path, &FileState::read(&path), b"mine").is_ok());
         assert_eq!(fs::read_to_string(&path).unwrap(), "mine");
+    }
+
+    #[test]
+    fn temporary_files_are_unique_per_write_and_cleaned_up_on_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        // 舊的固定暫存檔名被一個資料夾佔住:每次寫入各用自己的暫存檔名,不會撞到。
+        fs::create_dir(directory.path().join(".settings.json.purrdr-tmp")).unwrap();
+        let path = directory.path().join("settings.json");
+        write_atomically(&path, b"one", false).unwrap();
+        write_atomically(&path, b"two", false).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "two");
+
+        // 目標是資料夾所以改名失敗:暫存檔要被清掉。
+        let blocked = directory.path().join("blocked");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(blocked.join("keep"), "x").unwrap();
+        assert!(write_atomically(&blocked, b"nope", false).is_err());
+        let leftovers: Vec<String> = fs::read_dir(directory.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains("purrdr-tmp") && name != ".settings.json.purrdr-tmp")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

@@ -24,8 +24,15 @@ pub enum ListError {
     Unreadable,
 }
 
+/// 最多讀幾個目錄項目就停(資料夾可能有幾十萬個項目):限制的是工作量，不只是回覆大小。
+const MAXIMUM_SCANNED_ENTRIES: usize = 10_000;
+
 /// 列出 `path` 的子資料夾。`state_directory` 是主機服務資料夾(一律不列、不進入)。
 pub fn list(path: &str, state_directory: &Path) -> Result<Listing, ListError> {
+    list_with_scan_limit(path, state_directory, MAXIMUM_SCANNED_ENTRIES)
+}
+
+fn list_with_scan_limit(path: &str, state_directory: &Path, scan_limit: usize) -> Result<Listing, ListError> {
     if !host_files::is_plain_absolute(path) {
         return Err(ListError::InvalidPath);
     }
@@ -40,9 +47,13 @@ pub fn list(path: &str, state_directory: &Path) -> Result<Listing, ListError> {
     if forbidden(&resolved) {
         return Err(ListError::NotAllowed);
     }
-    let entries = std::fs::read_dir(&resolved).map_err(|_| ListError::Unreadable)?;
+    let mut entries = std::fs::read_dir(&resolved).map_err(|_| ListError::Unreadable)?;
 
-    let mut directories: Vec<String> = entries
+    let scanned: Vec<_> = entries.by_ref().take(scan_limit).collect();
+    // 還有沒讀的項目:結果不完整。
+    let scan_truncated = entries.next().is_some();
+    let mut directories: Vec<String> = scanned
+        .into_iter()
         .filter_map(Result::ok)
         .filter_map(|entry| {
             let name = entry.file_name().into_string().ok()?;
@@ -56,7 +67,29 @@ pub fn list(path: &str, state_directory: &Path) -> Result<Listing, ListError> {
         })
         .collect();
     directories.sort_by(|left, right| left.to_lowercase().cmp(&right.to_lowercase()).then_with(|| left.cmp(right)));
-    let truncated = directories.len() > MAXIMUM_ENTRIES;
+    let truncated = scan_truncated || directories.len() > MAXIMUM_ENTRIES;
     directories.truncate(MAXIMUM_ENTRIES);
     Ok(Listing { directories, truncated })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scanning_stops_at_the_scan_limit_and_reports_truncated() {
+        let root = tempfile::tempdir().unwrap();
+        for index in 0..20 {
+            std::fs::create_dir(root.path().join(format!("d{index:02}"))).unwrap();
+        }
+        let state = tempfile::tempdir().unwrap();
+
+        let listing = list_with_scan_limit(root.path().to_str().unwrap(), state.path(), 5).unwrap();
+
+        assert!(listing.truncated);
+        assert_eq!(listing.directories.len(), 5, "只掃前 5 個項目");
+        let all = list_with_scan_limit(root.path().to_str().unwrap(), state.path(), 20).unwrap();
+        assert!(!all.truncated);
+        assert_eq!(all.directories.len(), 20);
+    }
 }

@@ -133,9 +133,10 @@ impl PushPlugin {
         }
     }
 
-    /// 標記 Agent 觀察者有在執行(主機服務直接送推播的前提)。
+    /// 標記 Agent 觀察者有在執行。主機服務直接送還需要家目錄(寫 lease 的地方),
+    /// 所以沒有家目錄時一律當作不能直接送:`push.install` 照常裝外掛，不會變成誰都不送。
     pub fn with_observer(mut self, running: bool) -> Self {
-        self.observer_running = running;
+        self.observer_running = running && self.home.is_some();
         self
     }
 
@@ -499,4 +500,24 @@ fn write_private_file(path: &Path, contents: &str) -> std::io::Result<()> {
         file.sync_all()?;
     }
     std::fs::rename(&temporary, path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn herdr() -> HerdrCli {
+        HerdrCli::at_path(PathBuf::from("herdr"), Vec::new())
+    }
+
+    #[test]
+    fn direct_push_needs_both_the_observer_and_a_known_home_directory() {
+        let home = Some(PathBuf::from("/home/demo"));
+        assert!(PushPlugin::new(herdr(), home.clone()).with_observer(true).observer_running);
+        assert!(!PushPlugin::new(herdr(), home).with_observer(false).observer_running);
+        assert!(
+            !PushPlugin::new(herdr(), None).with_observer(true).observer_running,
+            "沒有家目錄就沒有 lease，不能直接送"
+        );
+    }
 }
