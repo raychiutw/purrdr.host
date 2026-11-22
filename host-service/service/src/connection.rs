@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, MAXIMUM_QUEUED_PROMPTS, QueueFailure};
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
+use crate::codex_usage::{self, CodexCli, CodexUsageFailure};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::git_changes::{self, GitFailure};
 use crate::herdr_cli::HerdrCli;
@@ -33,7 +34,7 @@ use crate::protocol::{
     FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus, GitStatusResult, HerdrServer,
     PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen, PaneTerminalOpenResult,
     PushTestResult, QueueAdd, QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder, QueueReorderResult, ServerMessage,
-    SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, Welcome, Workspace,
+    SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate, UsageCodexResult, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
@@ -84,6 +85,7 @@ pub async fn serve(socket: WebSocket, context: ServiceContext, device_token: Opt
     let connection = ClientConnection {
         herdr: context.herdr.clone(),
         herdr_cli: context.herdr_cli.clone(),
+        codex_cli: context.codex_cli.clone(),
         audit: context.audit.clone(),
         outbound: outbound.clone(),
         handshaken: false,
@@ -255,6 +257,7 @@ struct ClientConnection {
     /// herdr 剛接受、等訂閱結果送出後才開始轉送的訂閱。
     accepted_subscription: Option<(String, HerdrSubscription)>,
     herdr_cli: HerdrCli,
+    codex_cli: CodexCli,
     /// 開著的 Pane 終端機，以串流識別碼(開啟請求的 request_id)為 key;drop 時子行程收尾。
     terminals: HashMap<String, PaneTerminal>,
     terminal_frames: mpsc::Sender<ServerMessage>,
@@ -403,6 +406,7 @@ impl ClientConnection {
                 push_reply(request.request_id, outcome, PushState::muted_result)
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
+            ClientMessage::UsageCodex(request) => codex_usage_reply(request.request_id, codex_usage::read(&self.codex_cli).await),
             ClientMessage::PushTest(request) => {
                 push_test_reply(request.request_id, self.push.send_test(&request.device_id, request.host_name.as_deref()).await)
             }
@@ -1235,6 +1239,20 @@ fn push_error(request_id: String, failure: PushFailure) -> ServerMessage {
         PushFailure::NotPaired => error(Some(request_id), ErrorCode::PushNotPaired, "this device has no push pairing on this host"),
         PushFailure::SendFailed(message) => error(Some(request_id), ErrorCode::PushSendFailed, &message),
         PushFailure::Internal(message) => error(Some(request_id), ErrorCode::InternalError, &message),
+    }
+}
+
+/// Codex 方案用量的結果轉成回應或錯誤。
+fn codex_usage_reply(request_id: String, outcome: Result<codex_usage::CodexUsage, CodexUsageFailure>) -> ServerMessage {
+    match outcome {
+        Ok(usage) => ServerMessage::UsageCodexResult(UsageCodexResult {
+            request_id,
+            captured_at: usage.captured_at,
+            periods: usage.periods,
+        }),
+        Err(CodexUsageFailure::NotFound) => error(Some(request_id), ErrorCode::CodexNotFound, "codex was not found on this host"),
+        Err(CodexUsageFailure::NotSignedIn) => error(Some(request_id), ErrorCode::CodexNotSignedIn, "Codex is not signed in with ChatGPT"),
+        Err(CodexUsageFailure::Failed(message)) => error(Some(request_id), ErrorCode::CodexFailed, &message),
     }
 }
 

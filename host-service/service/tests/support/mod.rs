@@ -11,6 +11,7 @@ use std::time::{Duration, SystemTime};
 
 use futures_util::{SinkExt, StreamExt};
 use purrdr_host_service::agent_observer::ObserverOptions;
+use purrdr_host_service::codex_usage::CodexCli;
 use purrdr_host_service::device_store::{DeviceStore, IssuedDevice};
 use purrdr_host_service::herdr_cli::HerdrCli;
 use purrdr_host_service::herdr_socket::{HerdrSocket, Platform};
@@ -400,12 +401,13 @@ pub async fn start_file_service(herdr_socket: HerdrSocket, options: FileServiceO
         options.state_directory,
         None,
         None,
+        CodexCli::search(),
     )
     .await
 }
 
 async fn start_service_with(herdr_socket: HerdrSocket, herdr_cli: HerdrCli, heartbeat: Heartbeat, transcripts: TranscriptEnvironment) -> TestHostService {
-    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None, None).await
+    start_service_with_options(herdr_socket, herdr_cli, heartbeat, transcripts, None, None, None, None, CodexCli::search()).await
 }
 
 /// 從 app 管理主機服務的測試：指定安裝位置(暫存家目錄加假系統);None 代表不是安裝好的那份。
@@ -419,6 +421,23 @@ pub async fn start_service_with_management(herdr_socket: HerdrSocket, service_ma
         None,
         service_management,
         None,
+        CodexCli::search(),
+    )
+    .await
+}
+
+/// Codex 方案用量的測試：指定 codex 執行檔(假的 codex)。
+pub async fn start_service_with_codex_cli(herdr_socket: HerdrSocket, codex_cli: CodexCli) -> TestHostService {
+    start_service_with_options(
+        herdr_socket,
+        HerdrCli::search(None),
+        Heartbeat::default(),
+        TranscriptEnvironment::default(),
+        None,
+        None,
+        None,
+        None,
+        codex_cli,
     )
     .await
 }
@@ -434,6 +453,7 @@ async fn start_service_with_options(
     state_directory: Option<PathBuf>,
     service_management: Option<ServiceManagement>,
     observer: Option<ObserverOptions>,
+    codex_cli: CodexCli,
 ) -> TestHostService {
     let state_root = tempfile::tempdir().unwrap();
     let state_path = state_directory.unwrap_or_else(|| state_root.path().to_owned());
@@ -447,6 +467,7 @@ async fn start_service_with_options(
         temporary_directory,
         service_management,
         observer,
+        codex_cli,
     })
     .await
     .expect("啟動主機服務");
@@ -508,6 +529,7 @@ pub async fn start_service_with_observer(
         state_directory,
         None,
         Some(observer),
+        CodexCli::search(),
     )
     .await
 }

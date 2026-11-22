@@ -78,6 +78,8 @@ pub enum ClientMessage {
     PushUpdateMuted(PushUpdateMuted),
     #[serde(rename = "push.test")]
     PushTest(PushTest),
+    #[serde(rename = "usage.codex")]
+    UsageCodex(UsageCodex),
     #[serde(rename = "workspace.create")]
     WorkspaceCreate(WorkspaceCreate),
     #[serde(rename = "workspace.rename")]
@@ -187,6 +189,8 @@ pub enum ServerMessage {
     PushUpdateMutedResult(PushUpdateMutedResult),
     #[serde(rename = "push.test.result")]
     PushTestResult(PushTestResult),
+    #[serde(rename = "usage.codex.result")]
+    UsageCodexResult(UsageCodexResult),
     #[serde(rename = "workspace.create.result")]
     WorkspaceCreateResult(WorkspaceCreateResult),
     #[serde(rename = "workspace.rename.result")]
@@ -1333,6 +1337,42 @@ pub struct PushTestResult {
     pub request_id: String,
 }
 
+/// Codex 的方案用量(raychiutw/purrdr.host#62,0.12.0 起):主機服務以本機使用者身分執行一次 codex app-server,讀 account/rateLimits/read(同 app 經 SSH 的 CodexPlanUsageHost),讀到就結束子程序。唯讀，唯讀裝置也可用。找不到 codex 回 codex_not_found;沒以 ChatGPT 登入回 codex_not_signed_in;其他失敗回 codex_failed。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageCodex {
+    pub request_id: String,
+}
+
+/// Codex 的方案用量。有多個 bucket 時用 Codex 本身的(codex)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageCodexResult {
+    pub request_id: String,
+    /// RFC 3339(UTC,到秒):主機服務讀取的時間。
+    pub captured_at: String,
+    /// 依 five_hour、week 排序;Codex 沒回的週期不出現(可能是空陣列)。
+    pub periods: Vec<PlanUsagePeriod>,
+}
+
+/// 方案用量的一個週期。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanUsagePeriod {
+    pub kind: PlanUsagePeriodKind,
+    /// 已用比例，四捨五入到整數、夾在 0～100(app 也只顯示整數)。
+    pub used_percentage: i64,
+    /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resets_at: Option<String>,
+}
+
+/// 週期種類：週期長度不到一天是 five_hour,否則是 week(Codex 沒回長度時，primary 是 five_hour、secondary 是 week)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PlanUsagePeriodKind {
+    #[serde(rename = "five_hour")]
+    FiveHour,
+    #[serde(rename = "week")]
+    Week,
+}
+
 /// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在系統暫存目錄底下的上傳資料夾(x-upload-folder)建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FileUploadStart {
@@ -1525,7 +1565,7 @@ pub struct ErrorMessage {
     pub supported_protocol_versions: Option<Vec<i64>>,
 }
 
-/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+/// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);codex_not_found:usage.codex 找不到 codex 執行檔;codex_not_signed_in:Codex 沒以 ChatGPT 登入(或用 API key);codex_failed:codex app-server 回報失敗、沒有回應或回應看不懂(message 是原因);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ErrorCode {
     #[serde(rename = "invalid_message")]
@@ -1570,6 +1610,12 @@ pub enum ErrorCode {
     PushNotPaired,
     #[serde(rename = "push_send_failed")]
     PushSendFailed,
+    #[serde(rename = "codex_not_found")]
+    CodexNotFound,
+    #[serde(rename = "codex_not_signed_in")]
+    CodexNotSignedIn,
+    #[serde(rename = "codex_failed")]
+    CodexFailed,
     #[serde(rename = "upload_too_large")]
     UploadTooLarge,
     #[serde(rename = "device_unknown")]

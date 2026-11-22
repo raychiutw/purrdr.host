@@ -48,6 +48,7 @@ extension HostServiceProtocol {
         case pushRemove(PushRemove)
         case pushUpdateMuted(PushUpdateMuted)
         case pushTest(PushTest)
+        case usageCodex(UsageCodex)
         case workspaceCreate(WorkspaceCreate)
         case workspaceRename(WorkspaceRename)
         case workspaceClose(WorkspaceClose)
@@ -104,6 +105,7 @@ extension HostServiceProtocol {
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
             case "push.update_muted": self = .pushUpdateMuted(try PushUpdateMuted(from: decoder))
             case "push.test": self = .pushTest(try PushTest(from: decoder))
+            case "usage.codex": self = .usageCodex(try UsageCodex(from: decoder))
             case "workspace.create": self = .workspaceCreate(try WorkspaceCreate(from: decoder))
             case "workspace.rename": self = .workspaceRename(try WorkspaceRename(from: decoder))
             case "workspace.close": self = .workspaceClose(try WorkspaceClose(from: decoder))
@@ -213,6 +215,9 @@ extension HostServiceProtocol {
             case .pushTest(let message):
                 try container.encode("push.test", forKey: .type)
                 try message.encode(to: encoder)
+            case .usageCodex(let message):
+                try container.encode("usage.codex", forKey: .type)
+                try message.encode(to: encoder)
             case .workspaceCreate(let message):
                 try container.encode("workspace.create", forKey: .type)
                 try message.encode(to: encoder)
@@ -317,6 +322,7 @@ extension HostServiceProtocol {
         case pushRemoveResult(PushRemoveResult)
         case pushUpdateMutedResult(PushUpdateMutedResult)
         case pushTestResult(PushTestResult)
+        case usageCodexResult(UsageCodexResult)
         case workspaceCreateResult(WorkspaceCreateResult)
         case workspaceRenameResult(WorkspaceRenameResult)
         case workspaceCloseResult(WorkspaceCloseResult)
@@ -376,6 +382,7 @@ extension HostServiceProtocol {
             case "push.remove.result": self = .pushRemoveResult(try PushRemoveResult(from: decoder))
             case "push.update_muted.result": self = .pushUpdateMutedResult(try PushUpdateMutedResult(from: decoder))
             case "push.test.result": self = .pushTestResult(try PushTestResult(from: decoder))
+            case "usage.codex.result": self = .usageCodexResult(try UsageCodexResult(from: decoder))
             case "workspace.create.result": self = .workspaceCreateResult(try WorkspaceCreateResult(from: decoder))
             case "workspace.rename.result": self = .workspaceRenameResult(try WorkspaceRenameResult(from: decoder))
             case "workspace.close.result": self = .workspaceCloseResult(try WorkspaceCloseResult(from: decoder))
@@ -489,6 +496,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .pushTestResult(let message):
                 try container.encode("push.test.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .usageCodexResult(let message):
+                try container.encode("usage.codex.result", forKey: .type)
                 try message.encode(to: encoder)
             case .workspaceCreateResult(let message):
                 try container.encode("workspace.create.result", forKey: .type)
@@ -2873,6 +2883,75 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
+    /// Codex 的方案用量(raychiutw/purrdr.host#62,0.12.0 起):主機服務以本機使用者身分執行一次 codex app-server,讀 account/rateLimits/read(同 app 經 SSH 的 CodexPlanUsageHost),讀到就結束子程序。唯讀，唯讀裝置也可用。找不到 codex 回 codex_not_found;沒以 ChatGPT 登入回 codex_not_signed_in;其他失敗回 codex_failed。
+    public struct UsageCodex: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// Codex 的方案用量。有多個 bucket 時用 Codex 本身的(codex)。
+    public struct UsageCodexResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        /// RFC 3339(UTC,到秒):主機服務讀取的時間。
+        public var capturedAt: String
+        /// 依 five_hour、week 排序;Codex 沒回的週期不出現(可能是空陣列)。
+        public var periods: [PlanUsagePeriod]
+
+        public init(requestId: String, capturedAt: String, periods: [PlanUsagePeriod]) {
+            self.requestId = requestId
+            self.capturedAt = capturedAt
+            self.periods = periods
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case capturedAt = "captured_at"
+            case periods
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 方案用量的一個週期。
+    public struct PlanUsagePeriod: Codable, Sendable, Equatable {
+        public var kind: PlanUsagePeriodKind
+        /// 已用比例，四捨五入到整數、夾在 0～100(app 也只顯示整數)。
+        public var usedPercentage: Int
+        /// RFC 3339(UTC,到秒):這個週期重置的時間;Codex 沒回時沒有這欄。
+        public var resetsAt: String?
+
+        public init(kind: PlanUsagePeriodKind, usedPercentage: Int, resetsAt: String? = nil) {
+            self.kind = kind
+            self.usedPercentage = usedPercentage
+            self.resetsAt = resetsAt
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case kind
+            case usedPercentage = "used_percentage"
+            case resetsAt = "resets_at"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 週期種類：週期長度不到一天是 five_hour,否則是 week(Codex 沒回長度時，primary 是 five_hour、secondary 是 week)。
+    public enum PlanUsagePeriodKind: String, Codable, Sendable, CaseIterable {
+        case fiveHour = "five_hour"
+        case week
+    }
+}
+
+extension HostServiceProtocol {
     /// 上傳圖片或檔案(raychiutw/purrdr.host#16):開始一次分塊上傳。主機服務在系統暫存目錄底下的上傳資料夾(x-upload-folder)建暫存檔，檔名由主機服務產生(不採用 app 給的名稱),超過 7 天的上傳檔定期刪除。size 超過 x-maximum-file-size 回 upload_too_large。中繼資料剝除在 app 端做，主機服務不解析內容。
     public struct FileUploadStart: Codable, Sendable, Equatable {
         /// 也是這次上傳的 upload_id。
@@ -3298,7 +3377,7 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
+    /// 錯誤種類。WSS 收到 device_token_invalid／device_token_revoked 後，主機服務以 close code 4401 關閉連線;HTTPS 請求回 401。transcript_not_allowed:session 不是 herdr 目前回報的，或路徑不是這條連線定位過的(或其 session 資料夾 subagents/ 底下的 .jsonl);transcript_unsupported:這種 agent 的對話紀錄主機服務還讀不了;file_changed:file.read 時檔案已不是要求的版本;push_plugin_failed:herdr plugin list／install／uninstall 失敗(message 是 herdr 的輸出);push_not_paired:push.update_muted／push.test 時這支裝置在這台主機沒有推播配對(push.test 另含後台回 404／410);codex_not_found:usage.codex 找不到 codex 執行檔;codex_not_signed_in:Codex 沒以 ChatGPT 登入(或用 API key);codex_failed:codex app-server 回報失敗、沒有回應或回應看不懂(message 是原因);push_send_failed:push.test 連不上後台或後台回其他狀態碼(message 是後台的錯誤碼，例如 subscription_required、rate_limited、apns_failed;沒有錯誤碼時是 http <狀態碼> 或連線錯誤);device_unknown:devices.revoke 的 device_id 不是這台主機配對過的裝置;upload_too_large:上傳的總大小或分塊超過 x-maximum-file-size／x-maximum-file-chunk;host_service_not_installed:主機服務不是安裝好的那份，不能從 app 管理;update_in_progress:已有另一個更新在進行;update_failed:取不到最新版本、改不了設定或啟動不了更新程序(message 是原因);pane_changed:送出前比對 expected_session／expected_screen 不符，沒有送出;cwd_not_allowed:git.status／git.diff 的 cwd 不是 herdr 目前回報的 Agent 工作目錄;not_git_repository:cwd 不在 git repo 的工作目錄裡;queue_full:這個 pane 的 Send When Done 佇列已有 20 則;queue_item_unknown:queue.remove／queue.reorder 的 item_id 不在佇列裡;其他 transcript_* 對應行為規格 §4.7 的缺席、不可讀、有歧義、已壓縮。
     public enum ErrorCode: String, Codable, Sendable, CaseIterable {
         case invalidMessage = "invalid_message"
         case handshakeRequired = "handshake_required"
@@ -3321,6 +3400,9 @@ extension HostServiceProtocol {
         case pushPluginFailed = "push_plugin_failed"
         case pushNotPaired = "push_not_paired"
         case pushSendFailed = "push_send_failed"
+        case codexNotFound = "codex_not_found"
+        case codexNotSignedIn = "codex_not_signed_in"
+        case codexFailed = "codex_failed"
         case uploadTooLarge = "upload_too_large"
         case deviceUnknown = "device_unknown"
         case hostServiceNotInstalled = "host_service_not_installed"

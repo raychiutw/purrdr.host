@@ -10,6 +10,7 @@ mod agent_push;
 pub mod attention;
 pub mod audit_log;
 pub mod auto_update;
+pub mod codex_usage;
 mod connection;
 pub mod device_store;
 mod git_changes;
@@ -70,6 +71,8 @@ pub struct HostServiceConfig {
     pub service_management: Option<remote_management::ServiceManagement>,
     /// 常駐的 Agent 觀察者(Send When Done 佇列);None 時不啟動(測試預設)。
     pub observer: Option<agent_observer::ObserverOptions>,
+    /// Codex 方案用量執行的 codex。
+    pub codex_cli: codex_usage::CodexCli,
 }
 
 /// 預設埠(127.0.0.1 上)。
@@ -128,6 +131,7 @@ impl HostServiceConfig {
                 .ok()
                 .and_then(remote_management::for_installed_copy),
             observer: Some(agent_observer::ObserverOptions::default()),
+            codex_cli: codex_usage::CodexCli::search(),
         })
     }
 }
@@ -193,6 +197,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         observer: observer.as_ref().map(|(observer, _)| observer.clone()),
         push: push_plugin::PushPlugin::new(config.herdr_cli.clone(), config.transcripts.home.clone()),
         herdr_cli: config.herdr_cli,
+        codex_cli: config.codex_cli,
         devices: DeviceStore::new(&config.state_directory),
         audit: AuditLog::new(&config.state_directory),
         log: log.clone(),

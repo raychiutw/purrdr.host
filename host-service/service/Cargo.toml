@@ -1,6 +1,6 @@
 [package]
 name = "purrdr-host-service"
-version = "0.11.0"
+version = "0.12.0"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -67,6 +67,10 @@ harness = false
 # 假的 herdr CLI(plugin list／install／uninstall)是這支測試執行檔本身，所以不用 libtest。
 [[test]]
 name = "push_plugin"
+harness = false
+
+[[test]]
+name = "codex_usage"
 harness = false
 
 # 自己當「呼叫端」程序，所以不用 libtest。
