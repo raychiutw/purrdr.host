@@ -16,6 +16,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
         }
     };
     let herdr_socket = config.herdr_socket.clone();
+    let herdr_cli = config.herdr_cli.clone();
     let state_directory = config.state_directory.clone();
     let log = crate::service_log::ServiceLog::under(&state_directory);
     let service = match crate::start(config).await {
@@ -39,7 +40,7 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     }
     repair_command_alias(&log);
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
-    let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket);
+    let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket, herdr_cli);
     service.wait().await;
     ExitCode::SUCCESS
 }
