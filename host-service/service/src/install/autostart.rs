@@ -135,9 +135,7 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
 /// (raychiutw/purrdr.host#51)。輪詢 `launchctl print` 直到 job 消失;等不到就放行，由後面的 bootstrap 回報錯誤。
 fn wait_until_unloaded(system: &mut impl HostSystem, job: &str) {
     for attempt in 0..UNLOAD_POLL_LIMIT {
-        let still_loaded = system
-            .run("launchctl", &["print".into(), job.to_owned()])
-            .is_ok_and(|output| output.success);
+        let still_loaded = system.run("launchctl", &["print".into(), job.to_owned()]).is_ok_and(|output| output.success);
         if !still_loaded {
             return;
         }
