@@ -95,7 +95,9 @@ foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -Filter 'push
         # 順序號(herdr 預設的 Tab 名稱)或空字串(含全空白)不是 Tab label。
         if ($tab -match '^[0-9]*$') { $tab = $null }
         if (-not $tab) { $tab = $agent }
-        # 後台的 tab 最長 100 字元:截斷(以 UTF-16 單位算，只會少不會多;不切開代理對)。
+        # 後台的 tab 最長 100 字元。規則順序(與主機服務、notify.sh 相同):前面已修頭尾空白 →
+        # 最多 100 個 UTF-16 單位(.NET 的 String.Length 就是 UTF-16 單位，不管後台怎麼數字元都不會超過) →
+        # 第 100 個單位是代理對的高位就整對捨棄(不切開) → 截斷後再修尾端空白。
         if ($tab -and $tab.Length -gt 100) {
             $tab = $tab.Substring(0, 100)
             if ([char]::IsHighSurrogate($tab[99])) { $tab = $tab.Substring(0, 99) }

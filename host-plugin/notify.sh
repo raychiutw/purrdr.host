@@ -90,14 +90,26 @@ lookup_pane() {
 
 agent=$(json_string "${HERDR_PLUGIN_EVENT_JSON:-}" agent)
 
-# 後台的 tab 最長 100 字元(超過回 400)、全空白視同沒帶:去掉前後空白，再以字元計截斷。
-# 輸入是 JSON 字串的原樣內容:`\"`、`\uXXXX` 這類跳脫序列算一個字元、不被切開(截斷後仍是合法 JSON);
-# UTF-8 以位元組處理(LC_ALL=C,字元起頭是非 0x80-0xBF 的位元組),不依賴 herdr 給外掛的 locale。
+# tab 的規則(與主機服務 `tab_name`、notify.ps1 相同):修頭尾空白 → 最多 100 個 UTF-16 單位 → 不切開代理對 → 截斷後再修尾端空白。
+# 後台的 tab 最長 100 字元(超過回 400);以 UTF-16 單位計(JavaScript 的 length),不管後台怎麼數字元都不會超過。
+# 輸入是 JSON 字串的原樣內容,一個單位是:
+#   - `\uXXXX` 與 `\"` 這類跳脫序列(1 個,不被切開,截斷後仍是合法 JSON);
+#   - UTF-8 的 1 到 3 位元組字元(1 個);4 位元組字元(emoji 等,UTF-16 是代理對)算 2 個。
+# 4 位元組字元的起頭位元組前先放一個 0xFF(UTF-8 不會出現)當第二個單位的記號,取 100 個單位後再拿掉記號;
+# 記號後的字元放不下時整個捨棄。跳脫的代理對(`\ud83d\ude00`)是兩個 `\uXXXX`,截斷後若剩落單的高位就拿掉(前面反斜線要成對,才是真的跳脫序列)。
+# 單獨的反斜線不算一般字元(否則 `\\` 可以被拆成兩種數法);UTF-8 以位元組處理(LC_ALL=C,字元起頭是非 0x80-0xBF 的位元組),不依賴 herdr 給外掛的 locale。
 trim_tab() {
   _low=$(printf '\200')
   _high=$(printf '\277')
+  _lead4_first=$(printf '\360')
+  _lead4_last=$(printf '\364')
+  _marker=$(printf '\377')
   printf '%s' "$1" | LC_ALL=C sed -E -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$//' \
-    -e "s/^((\\\\u[0-9a-fA-F]{4}|\\\\.|[^${_low}-${_high}][${_low}-${_high}]*){100}).*\$/\\1/"
+    -e "s/[${_lead4_first}-${_lead4_last}]/${_marker}&/g" \
+    -e "s/^((\\\\u[0-9a-fA-F]{4}|\\\\.|${_marker}|[^\\${_low}-${_high}][${_low}-${_high}]*){100}).*\$/\\1/" \
+    -e "s/${_marker}//g" \
+    -e 's/(^|[^\\])((\\\\)*)\\u[dD][89aAbB][0-9a-fA-F]{2}$/\1\2/' \
+    -e 's/[[:space:]]+$//'
 }
 
 for file in "$HOME"/.purrdr/push-*/pairing; do

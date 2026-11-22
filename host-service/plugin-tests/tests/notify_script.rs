@@ -486,9 +486,9 @@ fi
         assert_eq!(call.body["tab"], r#"fix "login" \ bug"#);
     }
 
-    /// 後台的 `tab` 最長 100 字元(超過回 400):以字元計截斷，不切壞 UTF-8;剛好 100 字元不動
+    /// 後台的 `tab` 最長 100 字元(超過回 400):以 UTF-16 單位計 100 截斷，不切壞 UTF-8、不切開代理對;剛好 100 不動
     #[test]
-    fn long_tab_label_is_truncated_to_100_characters() {
+    fn long_tab_label_is_truncated_to_100_utf16_units() {
         let host = Host::new();
         host.pair("a1", &key_a(), &[]);
 
@@ -496,7 +496,13 @@ fi
             ("天".repeat(150), "天".repeat(100)),
             ("天".repeat(100), "天".repeat(100)),
             ("a".repeat(101), "a".repeat(100)),
-            ("é🙂".repeat(80), "é🙂".repeat(50)),
+            // é 算 1 個單位、🙂 算 2 個:33 組是 99 個單位，再放 é 剛好 100。
+            ("é🙂".repeat(80), format!("{}é", "é🙂".repeat(33))),
+            // 🙂 跨過第 100 個單位:整個捨棄，不留半個代理對。
+            (format!("{}🙂tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}🙂", "a".repeat(98)), format!("{}🙂", "a".repeat(98))),
+            // 截斷後尾端剩空白要再去掉。
+            (format!("{} 🙂tail", "a".repeat(98)), "a".repeat(98)),
         ] {
             host.write("herdr-tab-reply", &tab_reply(&label));
             host.run_hook(&blocked(), &default_context());
@@ -516,6 +522,11 @@ fi
             (format!("{}\\\"tail", "a".repeat(99)), format!("{}\"", "a".repeat(99))),
             (format!("{}\\u00e9tail", "a".repeat(99)), format!("{}é", "a".repeat(99))),
             (format!("{}\\\\tail", "a".repeat(99)), format!("{}\\", "a".repeat(99))),
+            // 跳脫的代理對(`\ud83d\ude00` = 😀)算 2 個單位:跨過第 100 個時整對捨棄，不能只留高位。
+            (format!("{}\\ud83d\\ude00tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}\\ud83d\\ude00tail", "a".repeat(98)), format!("{}😀", "a".repeat(98))),
+            // 逸出的反斜線後面接 `ud83d` 字樣是一般文字，不是代理對。
+            (format!("{}\\\\ud83dtail", "a".repeat(94)), format!("{}\\ud83d", "a".repeat(94))),
         ] {
             host.write("herdr-tab-reply", &tab_reply(&label));
             host.run_hook(&blocked(), &default_context());
@@ -1084,13 +1095,18 @@ mod notify_ps1 {
         assert_eq!(bodies[0]["workspace"], "weather-app");
     }
 
-    /// 後台的 `tab` 最長 100 字元、全空白視同沒帶:截斷(不切壞字元)、前後空白去掉、空白 label 改用 Agent 名稱
+    /// 後台的 `tab` 最長 100 字元、全空白視同沒帶:以 UTF-16 單位計 100 截斷(不切開代理對)、前後空白去掉、空白 label 改用 Agent 名稱
     #[test]
-    fn tab_is_cut_to_100_characters_and_blank_labels_fall_back() {
+    fn tab_is_cut_to_100_utf16_units_and_blank_labels_fall_back() {
         let cases = [
             ("天".repeat(150), "天".repeat(100)),
             // UTF-16 每組 3 個單位:33 組 99 個單位 + é = 100,不切開下一個代理對。
             ("é🙂".repeat(80), format!("{}é", "é🙂".repeat(33))),
+            // 🙂 跨過第 100 個單位:整個捨棄，不留半個代理對。
+            (format!("{}🙂tail", "a".repeat(99)), "a".repeat(99)),
+            (format!("{}🙂", "a".repeat(98)), format!("{}🙂", "a".repeat(98))),
+            // 截斷後尾端剩空白要再去掉。
+            (format!("{} 🙂tail", "a".repeat(98)), "a".repeat(98)),
             ("  後台 API  ".to_owned(), "後台 API".to_owned()),
             ("   ".to_owned(), "claude".to_owned()),
         ];
