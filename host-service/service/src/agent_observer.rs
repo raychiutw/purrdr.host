@@ -257,6 +257,8 @@ pub(crate) fn spawn(
         let mut statuses: HashMap<String, String> = HashMap::new();
         let mut attention = AttentionDetector::new(options.stuck_after, options.reminder_after);
         let mut delay = options.reconnect_initial;
+        // 上一輪是因 pane 增減而重新訂閱(lease 一直由主機服務持有，外掛沒有送)。
+        let mut resubscribing = false;
         loop {
             if let Some((subscription, subscribed_panes)) = subscribe_to_panes(&herdr).await {
                 delay = options.reconnect_initial;
@@ -267,6 +269,22 @@ pub(crate) fn spawn(
                     // 讀第一份 snapshot 到訂閱之間新開或關掉的 pane:訂閱沒涵蓋，重新訂閱。
                     panes_changed = snapshot_panes(&snapshot) != subscribed_panes;
                     let current = snapshot_statuses(&snapshot);
+                    // 重新訂閱的空檔裡變成 blocked／done 的 pane:外掛看到 lease 會讓位，所以由主機服務補送。
+                    let missed: Vec<(String, &'static str)> = if resubscribing {
+                        current
+                            .iter()
+                            .filter(|(pane_id, status)| statuses.get(*pane_id) != Some(status))
+                            .filter_map(|(pane_id, status)| Some((pane_id.clone(), direct_status(status)?)))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Some(home) = home.as_deref() {
+                        for (pane_id, kind) in missed {
+                            let (herdr, home) = (herdr.clone(), home.to_owned());
+                            tokio::spawn(async move { push(&herdr, &home, &pane_id, kind).await });
+                        }
+                    }
                     for (pane_id, status) in &current {
                         attention.status(pane_id, status, Instant::now());
                     }
@@ -291,9 +309,12 @@ pub(crate) fn spawn(
                     tokio::select! {
                         event = events.recv() => {
                             let Some(event) = event else { break };
-                            if is_pane_added_or_removed(&event) {
+                            // 訂閱裡除了 Agent 狀態只有 pane 新增／關閉;不比對事件名稱(herdr 有 `pane.x` 與 `pane_x` 兩種寫法)。
+                            let Some((pane_id, status)) = status_change(&event) else {
                                 panes_changed = true;
-                            } else if let Some((pane_id, status)) = status_change(&event) {
+                                continue;
+                            };
+                            {
                                 attention.status(&pane_id, &status, Instant::now());
                                 let previous = statuses.insert(pane_id.clone(), status.clone());
                                 if previous.as_deref() == Some("working") && is_finished(&status) {
@@ -314,17 +335,27 @@ pub(crate) fn spawn(
                             if let Some(direct) = &direct {
                                 sending = direct.refresh().await;
                             }
+                            // herdr 不一定為每個新 pane 發事件(例如新 workspace 的第一個 pane):定時比對一次。
+                            if let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await
+                                && snapshot_panes(&snapshot) != subscribed_panes
+                            {
+                                panes_changed = true;
+                                continue;
+                            }
                             check_attention(&herdr, &mut attention, home.as_deref()).await;
                         }
                     }
                 }
                 reader.abort();
+                resubscribing = panes_changed;
                 if panes_changed {
                     continue;
                 }
-                if let Some(direct) = &direct {
-                    direct.release();
-                }
+            }
+            // herdr 結束訂閱或訂閱不上(含重新訂閱失敗):沒有人在觀察，收回 lease 讓外掛接手。
+            resubscribing = false;
+            if let Some(direct) = &direct {
+                direct.release();
             }
             tokio::time::sleep(delay).await;
             delay = (delay * 2).min(options.reconnect_maximum);
@@ -432,6 +463,7 @@ async fn subscribe_to_panes(herdr: &HerdrClient) -> Option<(HerdrSubscription, B
     Some((subscription, panes))
 }
 
+/// snapshot 裡所有 pane 的 id(不論有沒有 Agent)。
 fn snapshot_panes(snapshot: &Value) -> BTreeSet<String> {
     snapshot["snapshot"]["panes"]
         .as_array()
@@ -439,14 +471,6 @@ fn snapshot_panes(snapshot: &Value) -> BTreeSet<String> {
         .flatten()
         .filter_map(|pane| Some(pane["pane_id"].as_str()?.to_owned()))
         .collect()
-}
-
-/// 訂閱裡除了 Agent 狀態只有 pane 新增／關閉;herdr 的事件名稱有 `pane.created` 與 `pane_created` 兩種寫法。
-fn is_pane_added_or_removed(event: &Value) -> bool {
-    matches!(
-        event["event"].as_str().map(|name| name.replace('.', "_")).as_deref(),
-        Some("pane_created" | "pane_closed")
-    )
 }
 
 fn status_change(event: &Value) -> Option<(String, String)> {

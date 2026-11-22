@@ -338,6 +338,51 @@ async fn a_pane_opened_while_subscribing_is_observed_too() {
     wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pC") == 1, "訂閱期間新開的 pane 轉成 blocked 沒有送").await;
 }
 
+/// herdr 沒為新 pane 發事件(例如新 workspace 的第一個 pane)時，檢查週期比對 snapshot 也會發現並訂閱。
+async fn a_pane_without_a_created_event_is_found_by_the_periodic_check() {
+    let harness = Harness::start(None).await;
+    harness.wait_for_lease().await;
+    let (snapshot, _) = snapshot_with_pane_c();
+    harness.herdr.set_reply("session.snapshot", snapshot);
+
+    wait_for_subscription_to_pane_c(&harness.herdr).await;
+    harness.event("w1:pC", "blocked");
+
+    wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pC") == 1, "檢查週期找到的 pane 轉成 blocked 沒有送").await;
+}
+
+/// 重新訂閱期間 lease 一直由主機服務持有(外掛不送):這段期間變成 blocked 的，對帳時由主機服務補送。
+async fn a_pane_that_became_blocked_while_resubscribing_is_still_sent() {
+    let harness = Harness::start(None).await;
+    harness.wait_for_lease().await;
+    let (mut snapshot, opened) = snapshot_with_pane_c();
+    let agents = snapshot["result"]["snapshot"]["agents"].as_array_mut().unwrap();
+    agents.iter_mut().find(|agent| agent["pane_id"] == "w1:pB").unwrap()["agent_status"] = json!("blocked");
+    harness.herdr.set_reply("session.snapshot", snapshot);
+
+    harness
+        .herdr
+        .push_event(json!({"event": "pane_created", "data": {"pane": opened, "workspace_id": "w1"}}));
+
+    wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pB") == 1, "重新訂閱期間變成 blocked 沒有補送").await;
+    harness.settle().await;
+    assert_eq!(harness.sent(PHONE_KEY, "blocked", "w1:pB"), 1, "只補送一次");
+}
+
+/// 重新訂閱失敗(例如 pane 在讀 snapshot 與訂閱之間關掉，herdr 回 pane_not_found)時收回 lease,讓外掛接手。
+async fn a_failed_resubscription_gives_the_lease_back() {
+    let harness = Harness::start(None).await;
+    harness.wait_for_lease().await;
+    harness.herdr.set_reply("events.subscribe", recorded("error.pane-not-found.ndjson"));
+    let (_, opened) = snapshot_with_pane_c();
+
+    harness
+        .herdr
+        .push_event(json!({"event": "pane_created", "data": {"pane": opened, "workspace_id": "w1"}}));
+
+    wait(|| harness.lease().is_none(), "重新訂閱失敗時沒有收回 lease").await;
+}
+
 // MARK: - 舊外掛不共存
 
 async fn a_legacy_plugin_keeps_the_host_service_from_sending_and_from_taking_the_lease() {
@@ -544,6 +589,15 @@ fn tests() -> Vec<TestCase> {
         ("a_pane_opened_later_is_observed_too", || Box::pin(a_pane_opened_later_is_observed_too())),
         ("a_pane_opened_while_subscribing_is_observed_too", || {
             Box::pin(a_pane_opened_while_subscribing_is_observed_too())
+        }),
+        ("a_pane_without_a_created_event_is_found_by_the_periodic_check", || {
+            Box::pin(a_pane_without_a_created_event_is_found_by_the_periodic_check())
+        }),
+        ("a_pane_that_became_blocked_while_resubscribing_is_still_sent", || {
+            Box::pin(a_pane_that_became_blocked_while_resubscribing_is_still_sent())
+        }),
+        ("a_failed_resubscription_gives_the_lease_back", || {
+            Box::pin(a_failed_resubscription_gives_the_lease_back())
         }),
         ("a_legacy_plugin_keeps_the_host_service_from_sending_and_from_taking_the_lease", || {
             Box::pin(a_legacy_plugin_keeps_the_host_service_from_sending_and_from_taking_the_lease())
