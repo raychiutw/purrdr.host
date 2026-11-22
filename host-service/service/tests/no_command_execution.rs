@@ -69,13 +69,14 @@ fn push_plugin_only_runs_fixed_herdr_plugin_commands() {
         r#"["plugin", "list", "--plugin", PLUGIN_ID, "--json"]"#,
         r#"["plugin", "install", PLUGIN_SOURCE, "--yes"]"#,
         r#"["plugin", "uninstall", PLUGIN_ID]"#,
+        r#"["plugin", "update", PLUGIN_ID, "--yes"]"#,
     ] {
         assert!(source.contains(subcommand), "少了 {subcommand}");
     }
     assert_eq!(
         source.matches(r#"["plugin", "#).count(),
-        3,
-        "herdr plugin 子指令只能是 list、install、uninstall"
+        4,
+        "herdr plugin 子指令只能是 list、install、uninstall、update"
     );
 }
 

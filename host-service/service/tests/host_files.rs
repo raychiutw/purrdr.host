@@ -536,6 +536,116 @@ async fn a_path_only_in_the_user_prompt_or_tool_output_is_not_mentioned() {
     assert_eq!(reply["status"], "denied");
 }
 
+/// 使用者 prompt 的一行對話紀錄。
+fn user_prompt(text: &str) -> String {
+    format!(
+        "{}\n",
+        json!({"type": "message", "message": {"role": "user", "content": [{"type": "text", "text": text}]}})
+    )
+}
+
+#[tokio::test]
+async fn an_upload_the_user_names_in_the_prompt_is_allowed_in_the_upload_folders() {
+    // raychiutw/purrdr.ios#421:使用者 prompt 裡、位在上傳資料夾(暫存目錄的 purrdr-uploads-<uid> 與相容期的舊 .purrdr/uploads)之下的路徑放行。
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let upload = fixture.in_temporary("purrdr-uploads-501/mh1-aaaaaaaa.jpg", b"hello");
+    let legacy = fixture.in_home(".purrdr/uploads/a1.jpg", b"hello");
+    let mut client = fixture.client().await;
+    fixture
+        .locate_journal(&mut client, &user_prompt(&format!("看 `{}` 與 `{}`", path_text(&upload), path_text(&legacy))))
+        .await;
+
+    let upload_reply = client.request(stat(&upload)).await;
+    let legacy_reply = client.request(stat(&legacy)).await;
+
+    assert_eq!(upload_reply["status"], "file");
+    assert_eq!(legacy_reply["status"], "file");
+}
+
+#[tokio::test]
+async fn other_paths_in_the_user_prompt_are_still_denied() {
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let temporary = fixture.in_temporary("shot.png", b"hello");
+    let report = fixture.in_home("Documents/report.pdf", b"hello");
+    let lookalike = fixture.in_home("purrdr-uploads-501/a1.jpg", b"hello");
+    let mut client = fixture.client().await;
+    let text = [&temporary, &report, &lookalike]
+        .iter()
+        .map(|path| format!("`{}`", path_text(path)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    fixture.locate_journal(&mut client, &user_prompt(&text)).await;
+
+    let replies = [
+        client.request(stat(&temporary)).await,
+        client.request(stat(&report)).await,
+        client.request(stat(&lookalike)).await,
+    ];
+
+    assert!(replies.iter().all(|reply| reply["status"] == "denied"), "{replies:?}");
+}
+
+#[tokio::test]
+async fn an_upload_not_named_in_the_prompt_is_denied() {
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let named = fixture.in_temporary("purrdr-uploads-501/a.jpg", b"hello");
+    let unnamed = fixture.in_temporary("purrdr-uploads-501/b.jpg", b"hello");
+    let mut client = fixture.client().await;
+    fixture.locate_journal(&mut client, &user_prompt(&format!("`{}`", path_text(&named)))).await;
+
+    let reply = client.request(stat(&unnamed)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_prompted_upload_that_is_a_symlink_to_outside_the_upload_folder_is_denied() {
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let secret = fixture.in_home("notes.txt", b"hello");
+    let link = fixture.temporary.join("purrdr-uploads-501").join("link.jpg");
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&secret, &link).unwrap();
+    let mut client = fixture.client().await;
+    fixture.locate_journal(&mut client, &user_prompt(&format!("`{}`", path_text(&link)))).await;
+
+    let reply = client.request(stat(&link)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
+#[tokio::test]
+async fn a_prompted_upload_still_goes_through_the_excluded_locations() {
+    let fixture = Fixture::start_with(FixtureOptions {
+        working_directory: WorkingDirectory::Home,
+        ..FixtureOptions::default()
+    })
+    .await;
+    let secret = fixture.in_temporary("purrdr-uploads-501/.env", b"hello");
+    let mut client = fixture.client().await;
+    fixture.locate_journal(&mut client, &user_prompt(&format!("`{}`", path_text(&secret)))).await;
+
+    let reply = client.request(stat(&secret)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
 #[tokio::test]
 async fn mentioned_paths_outside_temporary_uploads_and_tool_results_folders_are_denied() {
     let fixture = Fixture::start().await;
