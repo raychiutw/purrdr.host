@@ -6,7 +6,7 @@ use install_support::{FQDN, FakeSystem, LAUNCH_AGENT_LABEL, RUN_VALUE, SYSTEMD_U
 use std::time::SystemTime;
 
 use purrdr_host_service::herdr_socket::{Platform, SocketEnvironment};
-use purrdr_host_service::install::{InstallError, InstallOptions, InstallPlatform, InstallQuestion, Installer};
+use purrdr_host_service::install::{InstallError, InstallOptions, InstallPlatform, InstallQuestion, Installer, SkippedHttpsPort};
 use purrdr_host_service::management;
 use purrdr_host_service::state_directory::default_state_directory;
 
@@ -243,7 +243,8 @@ fn taken_443_asks_to_use_8443_and_declining_changes_nothing() {
             [InstallQuestion::UseAnotherHttpsPort {
                 taken_port: 443,
                 handlers: "/ -> http://127.0.0.1:8765".into(),
-                alternative: 8443
+                alternative: 8443,
+                skipped: vec![skipped(443, "http://127.0.0.1:8765")],
             }],
             "{platform:?}"
         );
@@ -271,11 +272,11 @@ fn taken_443_moves_to_the_first_free_https_port_when_accepted() {
 
         let installed = installer.install(&host.options(PORT), |_| true).unwrap();
 
-        assert_eq!(installed.https_address, format!("https://{FQDN}:10000"), "{platform:?}");
+        assert_eq!(installed.https_address, format!("https://{FQDN}:9443"), "{platform:?}");
         let serve = &installer.system().state.serve;
         assert_eq!(serve[&format!("{FQDN}:443")]["/"], "http://127.0.0.1:8765");
         assert_eq!(serve[&format!("{FQDN}:8443")]["/"], "http://127.0.0.1:3000");
-        assert_eq!(serve[&format!("{FQDN}:10000")]["/"], "http://127.0.0.1:47820");
+        assert_eq!(serve[&format!("{FQDN}:9443")]["/"], "http://127.0.0.1:47820");
     }
 }
 
@@ -283,7 +284,7 @@ fn taken_443_moves_to_the_first_free_https_port_when_accepted() {
 fn no_free_https_port_fails_without_asking_or_changing_anything() {
     let host = TestHost::new(InstallPlatform::Windows);
     let mut system = FakeSystem::ready(&host.home.0);
-    for https_port in [443, 8443, 10_000] {
+    for https_port in [443, 8443, 9443, 10_000, 10_443] {
         occupy_https_port(&mut system, https_port, "http://127.0.0.1:3000");
     }
     let system_before = system.state.clone();
@@ -606,4 +607,75 @@ fn auto_update_can_be_switched_and_records_without_it_mean_on() {
 
     assert_eq!((off, on), (serde_json::json!(false), serde_json::json!(true)));
     assert_eq!(record(&host)["auto_update"], true);
+}
+
+fn skipped(port: u16, target: &str) -> SkippedHttpsPort {
+    SkippedHttpsPort {
+        port,
+        handlers: format!("/ -> {target}"),
+    }
+}
+
+#[test]
+fn suggestion_skips_taken_candidates_and_names_who_uses_them() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let mut system = FakeSystem::ready(&host.home.0);
+    occupy_https_port(&mut system, 443, "http://127.0.0.1:8080");
+    occupy_https_port(&mut system, 8443, "http://127.0.0.1:8765");
+    let mut installer = Installer::new(host.environment(), system);
+
+    let suggestion = installer.suggest_https_port(PORT).unwrap();
+
+    assert_eq!(suggestion.port, Some(9443));
+    assert_eq!(
+        suggestion.skipped,
+        [skipped(443, "http://127.0.0.1:8080"), skipped(8443, "http://127.0.0.1:8765")]
+    );
+}
+
+#[test]
+fn suggestion_reaches_the_last_candidate_and_reports_none_when_all_are_taken() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let suggest = |taken: &[u16]| {
+        let mut system = FakeSystem::ready(&host.home.0);
+        for https_port in taken {
+            occupy_https_port(&mut system, *https_port, "http://127.0.0.1:3000");
+        }
+        Installer::new(host.environment(), system).suggest_https_port(PORT).unwrap()
+    };
+
+    let last_free = suggest(&[443, 8443, 9443, 10_000]);
+    assert_eq!(last_free.port, Some(10_443));
+    assert_eq!(last_free.skipped.len(), 4);
+
+    let none_free = suggest(&[443, 8443, 9443, 10_000, 10_443]);
+    assert_eq!(none_free.port, None);
+    assert_eq!(none_free.skipped.len(), 5);
+}
+
+#[test]
+fn suggestion_keeps_the_port_this_host_service_already_uses_without_skips() {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let mut system = FakeSystem::ready(&host.home.0);
+    occupy_https_port(&mut system, 443, "http://127.0.0.1:8080");
+    let mut installer = Installer::new(host.environment(), system);
+    installer.install(&host.options_on_https_port(PORT, 9443), |_| true).unwrap();
+
+    let suggestion = installer.suggest_https_port(PORT).unwrap();
+
+    assert_eq!(suggestion.port, Some(9443));
+    assert!(suggestion.skipped.is_empty(), "{:?}", suggestion.skipped);
+}
+
+#[test]
+fn suggestion_treats_a_port_already_serving_this_service_as_available() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut system = FakeSystem::ready(&host.home.0);
+    occupy_https_port(&mut system, 443, &format!("http://127.0.0.1:{PORT}"));
+    let mut installer = Installer::new(host.environment(), system);
+
+    let suggestion = installer.suggest_https_port(PORT).unwrap();
+
+    assert_eq!(suggestion.port, Some(443));
+    assert!(suggestion.skipped.is_empty());
 }
