@@ -68,6 +68,8 @@ pub enum ClientMessage {
     FileStat(FileStat),
     #[serde(rename = "file.read")]
     FileRead(FileRead),
+    #[serde(rename = "directory.list")]
+    DirectoryList(DirectoryList),
     #[serde(rename = "push.status")]
     PushStatus(PushStatus),
     #[serde(rename = "push.install")]
@@ -177,6 +179,8 @@ pub enum ServerMessage {
     PaneTerminalClosed(PaneTerminalClosed),
     #[serde(rename = "file.stat.result")]
     FileStatResult(FileStatResult),
+    #[serde(rename = "directory.list.result")]
+    DirectoryListResult(DirectoryListResult),
     #[serde(rename = "file.read.result")]
     FileReadResult(FileReadResult),
     #[serde(rename = "push.status.result")]
@@ -257,6 +261,9 @@ pub struct Welcome {
     pub herdr: HerdrServer,
     /// 這支裝置配對成唯讀：寫入類操作會被拒絕(read_only_device),app 停用輸入。
     pub read_only: bool,
+    /// 這台主機使用者家目錄的絕對路徑(0.12.0 起);主機找不到家目錄時省略。app 用它把 ~ 換成路徑、當作 directory.list 的起點;舊版主機沒有這個欄位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub home_directory: Option<String>,
 }
 
 /// herdr 伺服器(不是 CLI)的版本與能力。
@@ -1173,6 +1180,26 @@ pub struct EventsUnsubscribeResult {
     pub request_id: String,
 }
 
+/// 列出主機上一個資料夾裡的子資料夾名稱(0.12.0 起,raychiutw/purrdr.host#26):給 HTTPS 主機的新增聊天瀏覽資料夾。只回資料夾名稱，絕不回檔案或檔案內容。唯讀，唯讀裝置也可用。主機服務解析 symlink 後再比對排除清單(x-excluded-file-locations)與主機服務資料夾:資料夾本身在排除清單就拒絕(directory_not_allowed),排除的子項目不列出。資料夾不存在或不是資料夾回 directory_not_found,讀不了回 directory_unreadable,path 不是絕對路徑或含 . 或 .. 段落回 invalid_message。~ 由 app 以 welcome 的 home_directory 換成路徑，主機服務不展開。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryList {
+    pub request_id: String,
+    /// 主機上的絕對路徑(不可含 . 或 .. 段落)。
+    pub path: String,
+}
+
+/// 子資料夾名稱(0.12.0 起):含隱藏(點開頭)資料夾，不分大小寫排序;指向資料夾的 symlink 以解析後的目標判斷,目標在排除清單就不列。超過 1000 筆時只回前面的，truncated 為 true。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DirectoryListResult {
+    pub request_id: String,
+    /// 原樣回傳要求的 path(不解析 symlink)。
+    pub path: String,
+    /// 子資料夾的名稱(不含路徑)。
+    pub directories: Vec<String>,
+    /// 子資料夾多於上限，directories 只含排序後的前面一段。
+    pub truncated: bool,
+}
+
 /// 主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FileStat {
@@ -1644,6 +1671,12 @@ pub enum ErrorCode {
     CwdNotAllowed,
     #[serde(rename = "not_git_repository")]
     NotGitRepository,
+    #[serde(rename = "directory_not_found")]
+    DirectoryNotFound,
+    #[serde(rename = "directory_not_allowed")]
+    DirectoryNotAllowed,
+    #[serde(rename = "directory_unreadable")]
+    DirectoryUnreadable,
     #[serde(rename = "queue_full")]
     QueueFull,
     #[serde(rename = "queue_item_unknown")]

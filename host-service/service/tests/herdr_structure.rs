@@ -63,6 +63,10 @@ async fn workspace_create_is_forwarded_without_focus_and_returns_its_root_pane()
 }
 
 async fn rejected_without_reaching_herdr(request: Value, method: &str) {
+    rejected_with_code_without_reaching_herdr(request, method, "invalid_message").await;
+}
+
+async fn rejected_with_code_without_reaching_herdr(request: Value, method: &str, code: &str) {
     let herdr = herdr_with(vec![(method, json!({"id": "", "result": {"type": "ok"}}))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
@@ -70,17 +74,31 @@ async fn rejected_without_reaching_herdr(request: Value, method: &str) {
 
     let reply = client.request(request.clone()).await;
 
-    assert_eq!(reply["code"], "invalid_message", "{request}");
+    assert_eq!(reply["code"], code, "{request}");
     assert_eq!(reply["request_id"], request["request_id"]);
     assert_eq!(herdr.methods(), ["ping"], "{request}");
 }
 
 #[tokio::test]
-async fn workspace_create_rejects_relative_or_missing_folders() {
+async fn workspace_create_rejects_relative_folders() {
+    for cwd in ["Projects/garden-journal", ""] {
+        rejected_without_reaching_herdr(json!({"type": "workspace.create", "request_id": "r2", "cwd": cwd}), "workspace.create").await;
+    }
+}
+
+#[tokio::test]
+async fn workspace_create_reports_missing_folders_and_files_as_directory_not_found() {
     let folder = TempDir::new().unwrap();
     let missing = folder.path().join("missing").to_string_lossy().into_owned();
-    for cwd in ["Projects/garden-journal", "", missing.as_str()] {
-        rejected_without_reaching_herdr(json!({"type": "workspace.create", "request_id": "r2", "cwd": cwd}), "workspace.create").await;
+    let file = folder.path().join("plain.txt");
+    std::fs::write(&file, "x").unwrap();
+    for cwd in [missing, file.to_string_lossy().into_owned()] {
+        rejected_with_code_without_reaching_herdr(
+            json!({"type": "workspace.create", "request_id": "r2", "cwd": cwd}),
+            "workspace.create",
+            "directory_not_found",
+        )
+        .await;
     }
 }
 
