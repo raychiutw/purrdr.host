@@ -276,11 +276,30 @@ pub struct InstallOptions {
     pub source_directory: PathBuf,
 }
 
+/// 建議 HTTPS 埠時跳過的候選埠，與占用它的服務(`tailscale serve` 的 `路徑 -> 目標`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedHttpsPort {
+    pub port: u16,
+    pub handlers: String,
+}
+
+/// HTTPS 埠的建議值：`port` 是第一個可用的候選埠(沒有時 `None`),`skipped` 是它前面被別人占用的候選埠。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsPortSuggestion {
+    pub port: Option<u16>,
+    pub skipped: Vec<SkippedHttpsPort>,
+}
+
 /// 安裝途中要使用者同意的事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallQuestion {
     /// 沒指定 `--https-port`,預設的埠已被別的服務占用：改用 `alternative`?
-    UseAnotherHttpsPort { taken_port: u16, handlers: String, alternative: u16 },
+    UseAnotherHttpsPort {
+        taken_port: u16,
+        handlers: String,
+        alternative: u16,
+        skipped: Vec<SkippedHttpsPort>,
+    },
     /// 主機名稱會進 Certificate Transparency 公開紀錄。
     CertificateTransparency { host_name: String },
 }
@@ -292,6 +311,7 @@ impl std::fmt::Display for InstallQuestion {
                 taken_port,
                 handlers,
                 alternative,
+                ..
             } => write!(
                 formatter,
                 "tailscale serve already uses HTTPS {taken_port} for another service ({handlers}). \
@@ -682,7 +702,8 @@ impl<S: HostSystem> Installer<S> {
             PortUse::Free => (preferred, false),
             PortUse::Ours { in_place } => (preferred, in_place),
             PortUse::Taken(handlers) => {
-                let available = self.first_free_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())?;
+                let suggestion = self.suggest_https_port_with(&tailscale, settings.port.value, previous.as_ref())?;
+                let available = suggestion.port.filter(|candidate| *candidate != preferred);
                 let taken = InstallError::ServePortTaken {
                     https_port: preferred,
                     handlers: handlers.clone(),
@@ -696,6 +717,7 @@ impl<S: HostSystem> Installer<S> {
                     taken_port: preferred,
                     handlers,
                     alternative,
+                    skipped: suggestion.skipped,
                 };
                 if !confirm(&question) {
                     return Err(taken);
@@ -773,6 +795,42 @@ impl<S: HostSystem> Installer<S> {
         })
     }
 
+    /// 沒指定 HTTPS 埠時的建議值(本機埠 `port`);唯讀，不改系統。
+    pub fn suggest_https_port(&mut self, port: u16) -> Result<HttpsPortSuggestion, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        self.suggest_https_port_with(&tailscale, port, previous.as_ref())
+    }
+
+    fn suggest_https_port_with(&mut self, tailscale: &Tailscale, port: u16, previous: Option<&InstallRecord>) -> Result<HttpsPortSuggestion, InstallError> {
+        // 重新安裝：上次的埠仍是自己的就不換。
+        if let Some(previous) = previous
+            && matches!(
+                self.check_https_port(tailscale, previous.https_port, port, Some(previous))?,
+                PortUse::Ours { .. }
+            )
+        {
+            return Ok(HttpsPortSuggestion {
+                port: Some(previous.https_port),
+                skipped: Vec::new(),
+            });
+        }
+        let mut skipped = Vec::new();
+        for candidate in tailscale::CANDIDATE_HTTPS_PORTS {
+            match self.check_https_port(tailscale, candidate, port, previous)? {
+                PortUse::Taken(handlers) => skipped.push(SkippedHttpsPort { port: candidate, handlers }),
+                PortUse::Free | PortUse::Ours { .. } => {
+                    return Ok(HttpsPortSuggestion {
+                        port: Some(candidate),
+                        skipped,
+                    });
+                }
+            }
+        }
+        Ok(HttpsPortSuggestion { port: None, skipped })
+    }
+
     /// HTTPS 埠目前是空的、已是主機服務的，還是被別的服務占用。
     fn check_https_port(&mut self, tailscale: &Tailscale, https_port: u16, port: u16, previous: Option<&InstallRecord>) -> Result<PortUse, InstallError> {
         let handlers = tailscale.https_handlers(&mut self.system, https_port)?;
@@ -789,16 +847,6 @@ impl<S: HostSystem> Installer<S> {
             return Ok(PortUse::Ours { in_place: false });
         }
         Ok(PortUse::Taken(tailscale::describe(&handlers)))
-    }
-
-    /// 候選 HTTPS 埠中第一個可用的(跳過已被占用的 `taken`)。
-    fn first_free_https_port(&mut self, tailscale: &Tailscale, taken: u16, port: u16, previous: Option<&InstallRecord>) -> Result<Option<u16>, InstallError> {
-        for candidate in tailscale::CANDIDATE_HTTPS_PORTS.into_iter().filter(|candidate| *candidate != taken) {
-            if !matches!(self.check_https_port(tailscale, candidate, port, previous)?, PortUse::Taken(_)) {
-                return Ok(Some(candidate));
-            }
-        }
-        Ok(None)
     }
 
     fn read_record(&self, layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
