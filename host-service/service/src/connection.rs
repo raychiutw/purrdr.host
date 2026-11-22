@@ -18,6 +18,7 @@ use tokio::task::JoinHandle;
 
 use crate::agent_observer::{AgentObserver, MAXIMUM_PROMPT_BYTES, MAXIMUM_QUEUED_PROMPTS, QueueFailure};
 use crate::audit_log::{AuditEvent, AuditLog, RevokedBy};
+use crate::claude_usage::ClaudeUsage;
 use crate::codex_usage::{self, CodexCli, CodexUsageFailure};
 use crate::device_store::{Device, DeviceStore, RevokeFailure};
 use crate::git_changes::{self, GitFailure};
@@ -292,6 +293,11 @@ impl Drop for ClientConnection {
 }
 
 impl ClientConnection {
+    /// Claude 方案用量:位置只由家目錄與 `CLAUDE_CONFIG_DIR` 決定，app 不能指定路徑。
+    fn claude_usage(&self) -> ClaudeUsage {
+        ClaudeUsage::new(self.transcript_environment.home.clone(), self.transcript_environment.claude_config_dir.clone())
+    }
+
     async fn handle(&mut self, text: &str, device: &Device) {
         // Pane 終端機的輸入與關閉沒有回應。
         if let Some(reply) = self.reply(text, device).await {
@@ -407,6 +413,11 @@ impl ClientConnection {
             }
             ClientMessage::PushRemove(request) => push_reply(request.request_id, self.push.unpair(&request.device_id).await, PushState::unpaired_result),
             ClientMessage::UsageCodex(request) => codex_usage_reply(request.request_id, codex_usage::read(&self.codex_cli).await),
+            message @ (ClientMessage::UsageClaude(_)
+            | ClientMessage::UsageSessionContext(_)
+            | ClientMessage::ClaudeUsageStatus(_)
+            | ClientMessage::ClaudeUsageInstall(_)
+            | ClientMessage::ClaudeUsageRemove(_)) => self.claude_usage().handle(message).await,
             ClientMessage::PushTest(request) => {
                 push_test_reply(request.request_id, self.push.send_test(&request.device_id, request.host_name.as_deref()).await)
             }
