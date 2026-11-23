@@ -349,6 +349,11 @@ pub struct InstallPlan {
     pub certificate_notice: bool,
 }
 
+/// 說明網頁的安裝參數總表。
+pub const INSTALL_OPTIONS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/#install-options";
+/// 給 AI agent 看的純文字說明。
+pub const LLMS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/llms.txt";
+
 /// 安裝完成。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
@@ -395,6 +400,16 @@ impl std::fmt::Display for Installed {
             let name = if self.command_alias { command_alias::NAME } else { "purrdr-host-service" };
             write!(formatter, "\nAdded to your PATH: open a new terminal to run {name} directly.")?;
         }
+        // 之後怎麼改：沒加 PATH(或沒有別名)時用完整路徑，複製貼上才打得到。
+        let command = if short_name {
+            command_alias::NAME.to_owned()
+        } else {
+            self.pair_command.strip_suffix(" pair").unwrap_or(&self.pair_command).to_owned()
+        };
+        write!(
+            formatter,
+            "\n\nChange later:\n  Automatic updates:  {command} auto-update on|off\n  Other settings:     {command} install --<option> ...  (paired devices are kept)\n  All options:        {INSTALL_OPTIONS_URL}\n  For AI agents:      {LLMS_URL}"
+        )?;
         Ok(())
     }
 }
