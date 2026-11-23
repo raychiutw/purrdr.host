@@ -3,6 +3,7 @@
 #   irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps1 | iex
 #   & ([scriptblock]::Create((irm …/install.ps1))) --yes --port 47820   # 參數原樣交給 `purrdr-host-service install`
 #   & ([scriptblock]::Create((irm …/install.ps1))) --https-port 8443     # HTTPS 443 已被其他 `tailscale serve` 服務使用時
+#   $env:PURRDR_HTTPS_PORT=9443; irm …/install.ps1 | iex                  # `irm | iex` 不能帶參數，改以環境變數指定設定
 #
 # 下載 Release 壓縮檔，以 SHA256SUMS 驗證(不符就中止、不留檔),解壓到暫存資料夾後執行
 # `purrdr-host-service.exe install`(複製到 %USERPROFILE%\.purrdr\host-service\bin\ 並設定登入後自動啟動)。
@@ -11,6 +12,9 @@
 # 環境變數:
 #   PURRDR_HOST_SERVICE_VERSION       指定版本(例:0.1.0);預設最新版
 #   PURRDR_HOST_SERVICE_DOWNLOAD_URL  下載來源(網址或本機資料夾;測試用)
+#   PURRDR_PORT / PURRDR_HTTPS_PORT / PURRDR_SESSION / PURRDR_AUTO_UPDATE(0|1) / PURRDR_ADD_TO_PATH(0|1) / PURRDR_YES(1)
+#                                     安裝設定(等同對應的參數;參數優先)，原樣交給安裝程式。總表:
+#                                     https://raychiutw.github.io/purrdr/host-service/#install-options
 #
 # 以 `irm | iex` 執行時這份腳本跑在使用者的 session 裡：不用 exit(會關掉視窗),失敗以 throw 結束，函式與變數都包在 scriptblock 內。
 # 失敗訊息一律是「發生什麼」加一行「Next: 下一步」。

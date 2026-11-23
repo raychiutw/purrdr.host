@@ -36,7 +36,7 @@ irm https://github.com/raychiutw/purrdr.host/releases/latest/download/install.ps
 purrdr pair
 ```
 
-完整說明：https://raychiutw.github.io/purrdr/host-service/
+完整說明：https://raychiutw.github.io/purrdr/host-service/ · 安裝參數總表：https://raychiutw.github.io/purrdr/host-service/#install-options
 
 ## English
 
@@ -72,4 +72,4 @@ Then open a new terminal, run the command below, and scan the QR code with the a
 purrdr pair
 ```
 
-Full guide: https://raychiutw.github.io/purrdr/host-service/
+Full guide: https://raychiutw.github.io/purrdr/host-service/ · All install options: https://raychiutw.github.io/purrdr/host-service/#install-options

@@ -183,3 +183,29 @@ fn success_shows_the_https_address_and_how_to_pair() {
         ],
     );
 }
+
+const OPTIONS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/#install-options";
+const LLMS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/llms.txt";
+
+#[test]
+fn success_lists_how_to_change_settings_later_with_the_help_links() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    let installed = installer.install(&host.options_on_https_port(47_820, 8443), |_| true).unwrap();
+
+    let message = installed.to_string();
+    assert_contains_all(
+        &message,
+        &[
+            "Change later:",
+            "auto-update on|off",
+            " install --",
+            "paired devices are kept",
+            OPTIONS_URL,
+            LLMS_URL,
+        ],
+    );
+    // 配對步驟仍在「Change later」之前。
+    assert!(message.find("2. In Purrdr").unwrap() < message.find("Change later:").unwrap(), "{message}");
+}
