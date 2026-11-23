@@ -159,7 +159,7 @@ fn home_is_userprofile_on_windows_and_home_elsewhere() {
     assert_eq!(windows.home, std::path::PathBuf::from(r"C:\Users\demo"));
     assert_eq!(linux.home, std::path::PathBuf::from("/home/demo"));
     assert_eq!(windows.user_name.as_deref(), Some("demo"));
-    assert!(matches!(missing, Err(InstallError::Io(_))));
+    assert!(matches!(missing, Err(InstallError::HostEnvironment(_))));
 }
 
 #[test]

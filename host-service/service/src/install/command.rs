@@ -17,8 +17,10 @@ pub const INSTALL_COMMAND_VARIABLE: &str = "PURRDR_HOST_SERVICE_INSTALL_COMMAND"
 
 /// 執行子命令並回傳結束碼。
 pub async fn run_command(command: InstallCommand) -> ExitCode {
+    let json = matches!(command, InstallCommand::Install { json: true, .. });
     let environment = match HostEnvironment::from_process() {
         Ok(environment) => environment,
+        Err(error) if json => return fail_install_json(&error, "purrdr-host-service install --json", ExitCode::FAILURE),
         Err(error) => return fail(&error),
     };
     if let InstallCommand::Update { check_only, assume_yes } = command {
@@ -38,41 +40,26 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
         .unwrap_or_else(|| format!("{} install", shell_quoted(&environment.current_executable, environment.platform)));
     let platform = environment.platform;
     let rerun = rerun_install_command(&rerun_prefix, &command, platform);
-    let json_output = matches!(command, InstallCommand::Install { json: true, .. });
-    let mut installer = Installer::new(environment, CliSystem { json: json_output });
+    let mut installer = Installer::new(environment, CliSystem { json });
     match command {
-        InstallCommand::Install { json, .. } => {
+        InstallCommand::Install { .. } => {
             let environment = |name: &str| std::env::var(name).ok();
             // `--json` 時 stdout 只放最後那個 JSON 物件，人類看的訊息一律走 stderr。
             let fail_install = |error: &InstallError, rerun: &str| {
                 if json {
-                    println!("{}", failure_json(error, rerun));
+                    fail_install_json(error, rerun, ExitCode::FAILURE)
                 } else {
                     eprintln!("{}", error.explain(rerun));
+                    ExitCode::FAILURE
                 }
-                ExitCode::FAILURE
             };
             let requested = match RequestedSettings::resolve(&command, environment) {
                 Ok(requested) => requested,
-                Err(error) => {
-                    return if json {
-                        println!(
-                            "{}",
-                            serde_json::json!({ "ok": false, "error": { "kind": "invalid_environment", "message": error.explain(&rerun) }, "rerun_command": rerun })
-                        );
-                        ExitCode::FAILURE
-                    } else {
-                        eprintln!("{}", error.explain(&rerun));
-                        ExitCode::FAILURE
-                    };
-                }
+                Err(error) => return fail_install(&InstallError::InvalidEnvironment(error), &rerun),
             };
             let assume_yes = match assume_yes(&command, environment) {
                 Ok(assume_yes) => assume_yes,
-                Err(error) => {
-                    eprintln!("{}", error.explain(&rerun));
-                    return ExitCode::FAILURE;
-                }
+                Err(error) => return fail_install(&InstallError::InvalidEnvironment(error), &rerun),
             };
             let options = InstallOptions { requested, source_directory };
             let interactive = asks_questions(assume_yes, json, environment, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
@@ -293,6 +280,25 @@ fn run_update(environment: HostEnvironment, check_only: bool, assume_yes: bool) 
 fn fail_update(error: &UpdateError, rerun: &str) -> ExitCode {
     eprintln!("{}", error.explain(rerun));
     ExitCode::FAILURE
+}
+
+/// `--json` 的失敗:stdout 只印一個 JSON 物件。
+fn fail_install_json(error: &InstallError, rerun: &str, code: ExitCode) -> ExitCode {
+    println!("{}", failure_json(error, rerun));
+    code
+}
+
+/// 命令列參數解析失敗(結束碼 2)。`install --json` 時也以 JSON 回報，其他情況印到 stderr。
+pub fn report_invalid_arguments(arguments: &[String], message: &str) -> ExitCode {
+    if arguments.first().is_some_and(|name| name == "install") && arguments.iter().any(|argument| argument == "--json") {
+        return fail_install_json(
+            &InstallError::InvalidArguments(message.to_owned()),
+            "purrdr-host-service help",
+            ExitCode::from(2),
+        );
+    }
+    eprintln!("{message}");
+    ExitCode::from(2)
 }
 
 fn fail(error: &InstallError) -> ExitCode {

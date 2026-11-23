@@ -19,7 +19,7 @@ pub mod system;
 mod tailscale;
 mod user_path;
 
-pub use command::run_command;
+pub use command::{report_invalid_arguments, run_command};
 pub use command_alias::CommandAlias;
 pub use location::{HelperLauncher, InstalledService};
 use system::HostSystem;
@@ -137,7 +137,7 @@ impl HostEnvironment {
     pub fn resolve(platform: InstallPlatform, variable: impl Fn(&str) -> Option<String>, current_executable: PathBuf) -> Result<Self, InstallError> {
         let non_empty = |name: &str| variable(name).filter(|value| !value.is_empty());
         let home_variable = if platform == InstallPlatform::Windows { "USERPROFILE" } else { "HOME" };
-        let home = non_empty(home_variable).ok_or_else(|| InstallError::Io(format!("{home_variable} is not set")))?;
+        let home = non_empty(home_variable).ok_or_else(|| InstallError::HostEnvironment(format!("{home_variable} is not set")))?;
         Ok(HostEnvironment {
             platform,
             home: PathBuf::from(home),
@@ -152,7 +152,7 @@ impl HostEnvironment {
 
     /// 這個行程的主機資訊。
     pub fn from_process() -> Result<Self, InstallError> {
-        let current_executable = std::env::current_exe().map_err(InstallError::io)?;
+        let current_executable = std::env::current_exe().map_err(|error| InstallError::HostEnvironment(format!("cannot find this program: {error}")))?;
         Self::resolve(InstallPlatform::current(), |name| std::env::var(name).ok(), current_executable)
     }
 }
@@ -552,6 +552,12 @@ pub enum InstallError {
     Autostart(String),
     NotInstalled,
     Io(String),
+    /// 命令列參數不合法(`--json` 時也以 JSON 回報)。
+    InvalidArguments(String),
+    /// `PURRDR_*` 環境變數的值不合法。
+    InvalidEnvironment(settings::SettingsError),
+    /// 抓不到執行安裝需要的主機資訊(例如家目錄的環境變數沒設)。
+    HostEnvironment(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -626,6 +632,9 @@ impl InstallError {
             ),
             InstallError::Io(message) => format!("{message}\nNext: fix the problem above, {then_rerun}"),
             InstallError::NotInstalled => "The Purrdr host service is not installed.".to_owned(),
+            InstallError::InvalidArguments(message) => format!("{message}\nNext: see the install options with:\n  {rerun}"),
+            InstallError::InvalidEnvironment(error) => error.explain(rerun),
+            InstallError::HostEnvironment(message) => format!("{message}\nNext: run the install from a normal user session (with HOME or USERPROFILE set)."),
         }
     }
 
@@ -645,6 +654,9 @@ impl InstallError {
             InstallError::Autostart(_) => "autostart_failed",
             InstallError::NotInstalled => "not_installed",
             InstallError::Io(_) => "io_error",
+            InstallError::InvalidArguments(_) => "invalid_arguments",
+            InstallError::InvalidEnvironment(_) => "invalid_environment",
+            InstallError::HostEnvironment(_) => "host_environment",
         }
     }
 

@@ -169,6 +169,12 @@ impl FakeCommands {
 /// 在沒有終端機(stdin 是 /dev/null)的情況下跑安裝;PATH 只有假指令。
 #[cfg(unix)]
 fn run_install_with_fake_tailscale(home: &TempDirectory, commands: &FakeCommands, arguments: &[&str]) -> Output {
+    run_install_with_environment(home, commands, arguments, &[])
+}
+
+/// 同上，另外設定 `environment` 裡的環境變數。
+#[cfg(unix)]
+fn run_install_with_environment(home: &TempDirectory, commands: &FakeCommands, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
         .args(arguments)
         .env("HOME", &home.0)
@@ -178,6 +184,7 @@ fn run_install_with_fake_tailscale(home: &TempDirectory, commands: &FakeCommands
         .env_remove("CI")
         .env_remove("PURRDR_YES")
         .env_remove("PURRDR_HOST_SERVICE_INSTALL_COMMAND")
+        .envs(environment.iter().copied())
         .stdin(std::process::Stdio::null())
         .output()
         .unwrap()
@@ -268,4 +275,68 @@ fn json_keeps_stdout_a_single_object_even_when_tailscale_serve_prints_text() {
     assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Available within your tailnet"), "子行程的輸出應改走 stderr:{stderr}");
+}
+
+/// 讀 stdout 的單一 JSON 物件;不是 JSON 就讓測試失敗。
+#[cfg(unix)]
+fn stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"))
+}
+
+/// `--json` 時連參數解析失敗也輸出 JSON(kind `invalid_arguments`),結束碼維持用法錯誤的 2。
+#[cfg(unix)]
+#[test]
+fn json_reports_argument_errors_as_json() {
+    let home = TempDirectory::new("binary-json-arguments");
+    let commands = FakeCommands::new("Running");
+
+    for arguments in [
+        &["install", "--json", "--path", "--no-path"][..],
+        &["install", "--json", "--bind", "0.0.0.0"][..],
+        &["install", "--port", "--json"][..],
+    ] {
+        let output = run_install_with_fake_tailscale(&home, &commands, arguments);
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        let json = stdout_json(&output);
+        assert_eq!(json["ok"], false, "{arguments:?}");
+        assert_eq!(json["error"]["kind"], "invalid_arguments", "{arguments:?}: {json}");
+        assert!(!json["error"]["message"].as_str().unwrap().is_empty());
+    }
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+/// `PURRDR_YES` 不合法時，`--json` 也輸出 JSON(kind `invalid_environment`)。
+#[cfg(unix)]
+#[test]
+fn json_reports_an_invalid_purrdr_yes_as_json() {
+    let home = TempDirectory::new("binary-json-invalid-yes");
+    let commands = FakeCommands::new("Running");
+
+    let output = run_install_with_environment(&home, &commands, &["install", "--json"], &[("PURRDR_YES", "maybe")]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json = stdout_json(&output);
+    assert_eq!(json["error"]["kind"], "invalid_environment", "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("PURRDR_YES"), "{json}");
+}
+
+/// 抓不到家目錄(`HOME` 沒設)時，`--json` 也輸出 JSON(kind `host_environment`)。
+#[cfg(unix)]
+#[test]
+fn json_reports_a_missing_home_as_json() {
+    let commands = FakeCommands::new("Running");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(["install", "--json"])
+        .env_clear()
+        .env("PATH", &commands.bin)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json = stdout_json(&output);
+    assert_eq!(json["error"]["kind"], "host_environment", "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("HOME"), "{json}");
 }
