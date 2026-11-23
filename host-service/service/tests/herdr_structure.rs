@@ -324,7 +324,7 @@ async fn agent_start_is_forwarded_with_the_claude_permission_mode_as_arguments()
 }
 
 #[tokio::test]
-async fn agent_start_without_options_leaves_them_to_herdr() {
+async fn agent_start_of_codex_always_carries_no_daemon() {
     let herdr = herdr_with(vec![("agent.start", platform_recorded("agent.start.ndjson"))]).await;
     let service = start_service(herdr.socket.clone()).await;
     let mut client = TestClient::connect(&service).await;
@@ -336,7 +336,24 @@ async fn agent_start_without_options_leaves_them_to_herdr() {
 
     assert_eq!(
         forwarded(&herdr, "agent.start"),
-        json!({"name": "feature-sketch", "kind": "codex", "pane_id": "w3:p1"})
+        json!({"name": "feature-sketch", "kind": "codex", "pane_id": "w3:p1", "args": ["--no-daemon"]})
+    );
+}
+
+#[tokio::test]
+async fn agent_start_of_claude_without_options_adds_no_arguments() {
+    let herdr = herdr_with(vec![("agent.start", platform_recorded("agent.start.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    client
+        .request(json!({"type": "agent.start", "request_id": "r2", "pane_id": "w3:p1", "name": "feature-sketch", "kind": "claude"}))
+        .await;
+
+    assert_eq!(
+        forwarded(&herdr, "agent.start"),
+        json!({"name": "feature-sketch", "kind": "claude", "pane_id": "w3:p1"})
     );
 }
 
