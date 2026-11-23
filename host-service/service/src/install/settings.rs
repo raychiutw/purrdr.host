@@ -73,6 +73,21 @@ pub struct InstallSettings {
     pub add_to_path: Sourced<bool>,
 }
 
+impl InstallSettings {
+    /// 每一項的值與來源,一項一行(沒辦法詢問時印出，讓使用者知道採用了什麼)。
+    pub fn summary(&self) -> String {
+        [
+            "Settings:".to_owned(),
+            format!("  Local port: {} ({})", self.port.value, self.port.source),
+            format!("  HTTPS port: {} ({})", self.https_port.value, self.https_port.source),
+            format!("  herdr session: {} ({})", self.herdr_session.value.as_deref().unwrap_or("default"), self.herdr_session.source),
+            format!("  Auto update: {} ({})", if self.auto_update.value { "on" } else { "off" }, self.auto_update.source),
+            format!("  Add to PATH: {} ({})", if self.add_to_path.value { "yes" } else { "no" }, self.add_to_path.source),
+        ]
+        .join("\n")
+    }
+}
+
 /// 環境變數的值不合法。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsError {

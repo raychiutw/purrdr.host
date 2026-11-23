@@ -394,25 +394,7 @@ pub struct Installed {
 impl Installed {
     /// 每一項最後採用的值與來源(沒辦法詢問時印出，讓使用者知道裝了什麼)。
     pub fn settings_summary(&self) -> String {
-        let settings = &self.settings;
-        let yes_no = |value: bool| if value { "yes" } else { "no" };
-        [
-            "Settings:".to_owned(),
-            format!("  Local port: {} ({})", settings.port.value, settings.port.source),
-            format!("  HTTPS port: {} ({})", settings.https_port.value, settings.https_port.source),
-            format!(
-                "  herdr session: {} ({})",
-                settings.herdr_session.value.as_deref().unwrap_or("default"),
-                settings.herdr_session.source
-            ),
-            format!(
-                "  Auto update: {} ({})",
-                if settings.auto_update.value { "on" } else { "off" },
-                settings.auto_update.source
-            ),
-            format!("  Add to PATH: {} ({})", yes_no(settings.add_to_path.value), settings.add_to_path.source),
-        ]
-        .join("\n")
+        self.settings.summary()
     }
 }
 
@@ -803,11 +785,17 @@ enum PortUse {
 pub struct Installer<S: HostSystem> {
     environment: HostEnvironment,
     system: S,
+    /// 最近一次 `install` 已解析到的設定(安裝失敗時仍可讀，讓呼叫端說明各項設定與來源)。
+    attempted: Option<settings::InstallSettings>,
 }
 
 impl<S: HostSystem> Installer<S> {
     pub fn new(environment: HostEnvironment, system: S) -> Self {
-        Installer { environment, system }
+        Installer {
+            environment,
+            system,
+            attempted: None,
+        }
     }
 
     /// 安裝用的系統(測試檢查假系統狀態)。
@@ -818,6 +806,11 @@ impl<S: HostSystem> Installer<S> {
     /// 安裝用的系統(測試調整假系統狀態)。
     pub fn system_mut(&mut self) -> &mut S {
         &mut self.system
+    }
+
+    /// 最近一次 `install` 已解析到的設定;還沒解析到(例如讀安裝紀錄就失敗)時 `None`。
+    pub fn attempted_settings(&self) -> Option<&settings::InstallSettings> {
+        self.attempted.as_ref()
     }
 
     /// 取回安裝用的系統(測試接著交給更新流程)。
@@ -834,9 +827,10 @@ impl<S: HostSystem> Installer<S> {
     pub fn install(&mut self, options: &InstallOptions, mut confirm: impl FnMut(&InstallQuestion) -> bool) -> Result<Installed, InstallError> {
         let layout = self.layout();
         let previous = self.read_record(&layout)?;
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        self.attempted = Some(settings.clone());
         let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
         let host_name = tailscale.host_name(&mut self.system)?;
-        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
         let preferred = settings.https_port.value;
         let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
             PortUse::Free => (preferred, false),
@@ -866,6 +860,7 @@ impl<S: HostSystem> Installer<S> {
                     value: alternative,
                     source: settings::Source::Default,
                 };
+                self.attempted = Some(settings.clone());
                 (alternative, false)
             }
         };

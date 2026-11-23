@@ -5,7 +5,7 @@
 
 use serde_json::{Value, json};
 
-use super::settings::Sourced;
+use super::settings::{InstallSettings, Sourced};
 use super::system::HostSystem;
 use super::{InstallError, InstallOptions, InstallQuestion, Installed, Installer};
 
@@ -61,29 +61,36 @@ fn sourced<T: Into<Value> + Clone>(setting: &Sourced<T>) -> Value {
     json!({ "value": setting.value.clone().into(), "source": setting.source.as_str() })
 }
 
+fn settings_json(settings: &InstallSettings) -> Value {
+    json!({
+        "port": sourced(&settings.port),
+        "https_port": sourced(&settings.https_port),
+        "herdr_session": sourced(&settings.herdr_session),
+        "auto_update": sourced(&settings.auto_update),
+        "add_to_path": sourced(&settings.add_to_path),
+    })
+}
+
 /// `--json` 成功時的輸出:HTTPS 網址、各設定的值與來源、警告、配對指令。
 pub fn success_json(installed: &Installed) -> Value {
-    let settings = &installed.settings;
     json!({
         "ok": true,
         "https_address": installed.https_address,
-        "settings": {
-            "port": sourced(&settings.port),
-            "https_port": sourced(&settings.https_port),
-            "herdr_session": sourced(&settings.herdr_session),
-            "auto_update": sourced(&settings.auto_update),
-            "add_to_path": sourced(&settings.add_to_path),
-        },
+        "settings": settings_json(&installed.settings),
         "warnings": installed.warnings,
         "pair_command": installed.pair_command,
     })
 }
 
-/// `--json` 失敗時的輸出:錯誤種類與說明，加上重跑指令。
-pub fn failure_json(error: &InstallError, rerun: &str) -> Value {
-    json!({
+/// `--json` 失敗時的輸出:錯誤種類與說明，加上重跑指令;已解析到設定時(`settings`)也帶上各項的值與來源。
+pub fn failure_json(error: &InstallError, rerun: &str, settings: Option<&InstallSettings>) -> Value {
+    let mut output = json!({
         "ok": false,
         "error": { "kind": error.kind(), "message": error.explain(rerun) },
         "rerun_command": rerun,
-    })
+    });
+    if let Some(settings) = settings {
+        output["settings"] = settings_json(settings);
+    }
+    output
 }

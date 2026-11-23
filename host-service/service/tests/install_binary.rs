@@ -203,6 +203,7 @@ fn install_without_a_terminal_and_without_yes_stops_unchanged_and_gives_the_reru
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(stderr.contains("studio.tail1234.ts.net"), "{stderr}");
     assert!(stderr.contains("install --port 47999 --yes"), "{stderr}");
+    assert!(stderr.contains("Local port: 47999 (argument)"), "中途停止也要印出各項設定與來源:{stderr}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0, "家目錄不該被改動");
 }
 
@@ -221,6 +222,8 @@ fn json_does_not_count_as_consent_and_prints_one_json_object_on_stdout() {
     assert_eq!(json["error"]["kind"], "consent_required");
     let rerun = json["rerun_command"].as_str().unwrap();
     assert!(rerun.contains("--json") && rerun.contains("--yes") && rerun.contains("--port 47999"), "{rerun}");
+    assert_eq!(json["settings"]["port"], serde_json::json!({ "value": 47999, "source": "argument" }), "{json}");
+    assert_eq!(json["settings"]["https_port"]["source"], "default", "{json}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
 
@@ -237,6 +240,7 @@ fn json_failure_prints_the_error_and_the_rerun_command_as_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["kind"], "tailscale_not_running");
+    assert_eq!(json["settings"]["port"], serde_json::json!({ "value": 47820, "source": "default" }), "{json}");
     assert!(json["rerun_command"].as_str().unwrap().contains("install --yes --json"), "{json}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
