@@ -138,7 +138,7 @@ impl FakeCommands {
         );
         write(
             "tailscale",
-            &format!("case \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac"),
+            &format!("echo \"tailscale $*\" >> '{}'\ncase \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac", log.display()),
         );
         write("id", "echo 501");
         for name in [
@@ -160,6 +160,16 @@ impl FakeCommands {
         }
     }
 
+    /// 走到 `tailscale serve` 的測試用:紀錄裡有假 tailscale 的呼叫，代表用到的是 PATH 上的假指令，
+    /// 沒有退回 macOS 的 `/Applications/Tailscale.app/...` 之類真的 Tailscale。
+    fn assert_used_the_fake_tailscale(&self) {
+        let calls = self.calls();
+        assert!(
+            calls.contains("tailscale version") && calls.contains("tailscale serve --bg"),
+            "應該只用到假的 tailscale:{calls:?}"
+        );
+    }
+
     /// 假指令被呼叫的紀錄(沒有呼叫時是空字串)。
     fn calls(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
@@ -173,21 +183,23 @@ fn run_install_with_fake_tailscale(home: &TempDirectory, commands: &FakeCommands
 }
 
 /// 同上，另外設定 `environment` 裡的環境變數。
+/// 環境變數先全清，只放最小的 allow-list(PATH 是假指令資料夾、HOME／USERPROFILE 是暫存家目錄、TMPDIR),
+/// 開發者環境裡的 `PURRDR_*`、`HERDR_SESSION`、`CI` 等都不會影響結果。
 #[cfg(unix)]
 fn run_install_with_environment(home: &TempDirectory, commands: &FakeCommands, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"));
+    command
         .args(arguments)
+        .env_clear()
         .env("HOME", &home.0)
         .env("USERPROFILE", &home.0)
         .env("PATH", &commands.bin)
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("CI")
-        .env_remove("PURRDR_YES")
-        .env_remove("PURRDR_HOST_SERVICE_INSTALL_COMMAND")
         .envs(environment.iter().copied())
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap()
+        .stdin(std::process::Stdio::null());
+    if let Some(temporary) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", temporary);
+    }
+    command.output().unwrap()
 }
 
 #[cfg(unix)]
@@ -258,11 +270,16 @@ fn rollback_after_a_failed_install_only_reaches_the_fake_system_commands() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
+    commands.assert_used_the_fake_tailscale();
+    // 各平台只接受自己的回復指令:macOS 是 launchctl bootout,Linux 是 systemctl。
     let calls = commands.calls();
-    assert!(
-        calls.contains("launchctl bootout") || calls.contains("systemctl --user disable"),
-        "回復應呼叫到假的 launchctl／systemctl(代表 PATH 已隔離):{calls:?}"
-    );
+    let (expected, other) = if cfg!(target_os = "macos") {
+        ("launchctl bootout", "systemctl")
+    } else {
+        ("systemctl --user disable", "launchctl")
+    };
+    assert!(calls.contains(expected), "回復應呼叫到假的 {expected}(代表 PATH 已隔離):{calls:?}");
+    assert!(!calls.contains(other), "不該呼叫到 {other}:{calls:?}");
 }
 
 /// `tailscale serve --bg` 會把「Available within your tailnet…」印到自己的 stdout(經 `run_attached` 繼承);
@@ -277,6 +294,7 @@ fn json_keeps_stdout_a_single_object_even_when_tailscale_serve_prints_text() {
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
     assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
+    commands.assert_used_the_fake_tailscale();
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("Available within your tailnet"), "子行程的輸出應改走 stderr:{stderr}");
 }
