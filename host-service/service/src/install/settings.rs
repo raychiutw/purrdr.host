@@ -16,6 +16,8 @@ pub enum Source {
     Previous,
     /// 預設值。
     Default,
+    /// 互動安裝時使用者輸入的值。
+    Prompt,
 }
 
 impl Source {
@@ -26,6 +28,7 @@ impl Source {
             Source::Environment => "environment",
             Source::Previous => "previous",
             Source::Default => "default",
+            Source::Prompt => "prompt",
         }
     }
 }
@@ -46,7 +49,7 @@ pub struct Sourced<T> {
 impl<T> Sourced<T> {
     /// 使用者(參數或環境變數)明確指定的值，不是沿用或預設。
     pub fn is_explicit(&self) -> bool {
-        matches!(self.source, Source::Argument | Source::Environment)
+        matches!(self.source, Source::Argument | Source::Environment | Source::Prompt)
     }
 }
 
