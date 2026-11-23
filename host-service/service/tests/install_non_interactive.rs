@@ -2,7 +2,7 @@
 
 mod install_support;
 
-use install_support::{FQDN, FakeSystem, TestHost, snapshot};
+use install_support::{FQDN, FakeSystem, TestHost, occupy_https_port, snapshot};
 
 use purrdr_host_service::install::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
 use purrdr_host_service::install::{InstallError, InstallPlatform, InstallQuestion, Installer};
@@ -131,4 +131,54 @@ fn consent_failure_json_says_consent_is_needed() {
     assert_eq!(json["error"]["kind"], "consent_required");
     assert!(json["error"]["message"].as_str().unwrap().contains("notice text"), "{json}");
     assert_eq!(json["rerun_command"], "purrdr install --json --yes");
+}
+
+fn taken_default_port_host() -> (TestHost, Installer<FakeSystem>) {
+    let host = TestHost::new(InstallPlatform::MacOs);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    occupy_https_port(installer.system_mut(), 443, "http://127.0.0.1:8765");
+    (host, installer)
+}
+
+#[test]
+fn taken_default_https_port_switches_to_the_suggestion_without_asking_and_says_why() {
+    let (host, mut installer) = taken_default_port_host();
+
+    let installed = install_without_prompting(&mut installer, &host.options(47_820), true, |_| {}).unwrap();
+
+    assert_eq!(installed.https_address, format!("https://{FQDN}:8443"));
+    assert_eq!(installed.settings.https_port.value, 8443);
+    let warning = installed.warnings.join("\n");
+    assert!(warning.contains("443 is used by / -> http://127.0.0.1:8765"), "{warning}");
+    assert!(warning.contains("8443"), "{warning}");
+}
+
+#[test]
+fn switching_the_https_port_needs_no_yes_only_the_certificate_notice_does() {
+    let (host, mut installer) = taken_default_port_host();
+
+    let error = install_without_prompting(&mut installer, &host.options(47_820), false, |_| {}).unwrap_err();
+
+    assert!(matches!(error, InstallError::ConsentRequired { .. }), "換埠不該停在 ServePortTaken:{error:?}");
+}
+
+#[test]
+fn an_explicitly_given_https_port_that_is_taken_still_fails() {
+    let (host, mut installer) = taken_default_port_host();
+
+    let error = install_without_prompting(&mut installer, &host.options_on_https_port(47_820, 443), true, |_| {}).unwrap_err();
+
+    assert!(matches!(error, InstallError::ServePortTaken { https_port: 443, .. }), "{error:?}");
+}
+
+#[test]
+fn fails_only_when_every_candidate_https_port_is_taken() {
+    let (host, mut installer) = taken_default_port_host();
+    for port in [8443, 9443, 10_000, 10_443] {
+        occupy_https_port(installer.system_mut(), port, "http://127.0.0.1:1");
+    }
+
+    let error = install_without_prompting(&mut installer, &host.options(47_820), true, |_| {}).unwrap_err();
+
+    assert!(matches!(error, InstallError::ServePortTaken { available: None, .. }), "{error:?}");
 }

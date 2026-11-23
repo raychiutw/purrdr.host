@@ -17,7 +17,7 @@ pub fn asks_questions(assume_yes: bool, json: bool, environment: impl Fn(&str) -
 
 /// 不詢問地安裝。有 `assume_yes` 就視為同意所有問題(每個問題先交給 `on_question`，讓呼叫端記錄或顯示);
 /// 沒有時，第一次需要同意憑證公開(或主機名稱改變)就停止、什麼都不改，回 `ConsentRequired`。
-/// 換用其他 HTTPS 埠同樣需要 `--yes`;沒有時照原本的 `ServePortTaken` 停止，錯誤裡已有改用其他埠的重跑指令。
+/// 預設的 HTTPS 埠被占用時不需要 `--yes`，自動改用建議值並在警告說明;使用者指定的埠被占用，或候選都被占用才報錯。
 pub fn install_without_prompting<S: HostSystem>(
     installer: &mut Installer<S>,
     options: &InstallOptions,
@@ -25,18 +25,34 @@ pub fn install_without_prompting<S: HostSystem>(
     mut on_question: impl FnMut(&InstallQuestion),
 ) -> Result<Installed, InstallError> {
     let mut needs_consent = None;
-    let result = installer.install(options, |question| {
-        if assume_yes {
+    let mut port_changes = Vec::new();
+    let result = installer.install(options, |question| match question {
+        // 預設的 HTTPS 埠被占用:不詢問，直接用建議值(只有使用者明確指定的埠被占用才報錯，那在 `install` 裡處理);
+        // 原因記進警告。
+        InstallQuestion::UseAnotherHttpsPort { alternative, skipped, .. } => {
+            let reasons = skipped
+                .iter()
+                .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
+                .collect::<Vec<_>>()
+                .join("; ");
+            port_changes.push(format!("HTTPS {reasons}; using HTTPS {alternative} instead"));
+            true
+        }
+        InstallQuestion::CertificateTransparency { .. } if assume_yes => {
             on_question(question);
-            return true;
+            true
         }
-        if matches!(question, InstallQuestion::CertificateTransparency { .. }) {
+        InstallQuestion::CertificateTransparency { .. } => {
             needs_consent = Some(question.to_string());
+            false
         }
-        false
     });
     match (result, needs_consent) {
         (Err(InstallError::Declined), Some(notice)) => Err(InstallError::ConsentRequired { notice }),
+        (Ok(mut installed), _) => {
+            installed.warnings.splice(0..0, port_changes);
+            Ok(installed)
+        }
         (result, _) => result,
     }
 }
