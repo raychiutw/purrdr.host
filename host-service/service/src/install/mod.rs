@@ -11,6 +11,7 @@ mod autostart;
 mod command;
 mod command_alias;
 mod herdr_shortcut;
+pub mod interactive;
 mod location;
 pub mod settings;
 pub mod system;
@@ -322,6 +323,32 @@ impl std::fmt::Display for InstallQuestion {
     }
 }
 
+/// 預設或指定的 HTTPS 埠已被別的服務占用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsPortConflict {
+    /// 被占用的埠。
+    pub port: u16,
+    /// 占用它的服務(`tailscale serve` 的 `路徑 -> 目標`)。
+    pub handlers: String,
+    /// 建議改用的埠前面被別人占用的候選埠(含 `port` 本身)。
+    pub skipped: Vec<SkippedHttpsPort>,
+}
+
+/// 安裝前的計畫：照目前的設定安裝會是什麼樣子;唯讀，不改系統。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallPlan {
+    /// 採用的設定;預設的 HTTPS 埠被占用時 `https_port` 已是建議的替代埠。
+    pub settings: settings::InstallSettings,
+    pub host_name: String,
+    pub https_address: String,
+    /// 已經安裝過(重新安裝)。
+    pub reinstall: bool,
+    /// HTTPS 埠被占用的情形;沒有占用時 `None`。
+    pub https_port_conflict: Option<HttpsPortConflict>,
+    /// 這次要提醒主機名稱會公開(第一次安裝，或主機名稱和上次不同)。
+    pub certificate_notice: bool,
+}
+
 /// 安裝完成。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Installed {
@@ -629,6 +656,12 @@ struct InstallRecord {
 }
 
 impl InstallRecord {
+    /// 上次安裝時的主機名稱(取自 HTTPS 網址)。
+    fn host_name(&self) -> &str {
+        let address = self.https_address.strip_prefix("https://").unwrap_or(&self.https_address);
+        address.split([':', '/']).next().unwrap_or_default()
+    }
+
     fn settings_snapshot(&self) -> settings::PreviousSettings {
         settings::PreviousSettings {
             port: self.port,
@@ -680,6 +713,11 @@ impl<S: HostSystem> Installer<S> {
         &self.system
     }
 
+    /// 安裝用的系統(測試調整假系統狀態)。
+    pub fn system_mut(&mut self) -> &mut S {
+        &mut self.system
+    }
+
     /// 取回安裝用的系統(測試接著交給更新流程)。
     pub fn into_system(self) -> S {
         self.system
@@ -729,7 +767,9 @@ impl<S: HostSystem> Installer<S> {
                 (alternative, false)
             }
         };
-        if !confirm(&InstallQuestion::CertificateTransparency { host_name: host_name.clone() }) {
+        // 主機名稱和上次安裝相同就不再提醒。
+        let host_name_changed = previous.as_ref().is_none_or(|record| record.host_name() != host_name);
+        if host_name_changed && !confirm(&InstallQuestion::CertificateTransparency { host_name: host_name.clone() }) {
             return Err(InstallError::Declined);
         }
 
@@ -792,6 +832,60 @@ impl<S: HostSystem> Installer<S> {
             settings,
             herdr_shortcut,
             command_alias,
+        })
+    }
+
+    /// 照目前的設定安裝會是什麼樣子(互動安裝的摘要);唯讀，不改系統。
+    pub fn plan(&mut self, options: &InstallOptions) -> Result<InstallPlan, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        let host_name = tailscale.host_name(&mut self.system)?;
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        let preferred = settings.https_port.value;
+        let mut https_port_conflict = None;
+        if let PortUse::Taken(handlers) = self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
+            let suggestion = self.suggest_https_port_with(&tailscale, settings.port.value, previous.as_ref())?;
+            let alternative = suggestion
+                .port
+                .filter(|candidate| *candidate != preferred && !settings.https_port.is_explicit());
+            let skipped = match alternative {
+                Some(_) => suggestion.skipped,
+                None => vec![SkippedHttpsPort {
+                    port: preferred,
+                    handlers: handlers.clone(),
+                }],
+            };
+            if let Some(alternative) = alternative {
+                settings.https_port = settings::Sourced {
+                    value: alternative,
+                    source: settings::Source::Default,
+                };
+            }
+            https_port_conflict = Some(HttpsPortConflict {
+                port: preferred,
+                handlers,
+                skipped,
+            });
+        }
+        Ok(InstallPlan {
+            https_address: tailscale::https_address(&host_name, settings.https_port.value),
+            certificate_notice: previous.as_ref().is_none_or(|record| record.host_name() != host_name),
+            reinstall: previous.is_some(),
+            settings,
+            host_name,
+            https_port_conflict,
+        })
+    }
+
+    /// `https_port` 被別的服務占用時回占用它的服務(本機埠 `port`);空的或已是自己的回 `None`。唯讀。
+    pub fn https_port_taken_by(&mut self, https_port: u16, port: u16) -> Result<Option<String>, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        Ok(match self.check_https_port(&tailscale, https_port, port, previous.as_ref())? {
+            PortUse::Taken(handlers) => Some(handlers),
+            PortUse::Free | PortUse::Ours { .. } => None,
         })
     }
 

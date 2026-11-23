@@ -681,3 +681,26 @@ fn suggestion_treats_a_port_already_serving_this_service_as_available() {
     assert_eq!(suggestion.port, Some(443));
     assert!(suggestion.skipped.is_empty());
 }
+
+#[test]
+fn installing_again_on_the_same_host_name_does_not_repeat_the_certificate_notice() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    let mut first = 0;
+    installer
+        .install(&host.options(PORT), |question| {
+            first += usize::from(matches!(question, InstallQuestion::CertificateTransparency { .. }));
+            true
+        })
+        .unwrap();
+    let mut again = 0;
+
+    installer
+        .install(&host.options(PORT), |question| {
+            again += usize::from(matches!(question, InstallQuestion::CertificateTransparency { .. }));
+            true
+        })
+        .unwrap();
+
+    assert_eq!((first, again), (1, 0));
+}

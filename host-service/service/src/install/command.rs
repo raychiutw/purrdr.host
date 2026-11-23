@@ -1,8 +1,9 @@
 //! `install`／`uninstall`／`status`／`update`／`version` 子命令：接上真正的系統與終端機。
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 
+use super::interactive::{TerminalPrompter, install_interactively};
 use super::location::InstalledService;
 use super::settings::{RequestedSettings, assume_yes};
 use super::system::ProcessHostSystem;
@@ -66,7 +67,14 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
                 }
                 ask(&prompt)
             };
-            match installer.install(&options, confirm) {
+            // 有終端機且沒有 --yes:先摘要與選單;否則照設定直接安裝。
+            let interactive = !assume_yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let result = if interactive {
+                install_interactively(&mut installer, options, &mut TerminalPrompter)
+            } else {
+                installer.install(&options, confirm)
+            };
+            match result {
                 Ok(installed) => {
                     for warning in &installed.warnings {
                         eprintln!("warning: {warning}");

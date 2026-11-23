@@ -591,3 +591,41 @@ impl HostSystem for FakeSystem {
         Ok(())
     }
 }
+
+/// 詢問介面的假回答：依序回答每個提示，並把畫面上的文字(說明、提示與回答)記成逐字稿。
+pub struct ScriptedPrompter {
+    answers: std::collections::VecDeque<String>,
+    pub transcript: String,
+    pub prompts: Vec<String>,
+}
+
+impl ScriptedPrompter {
+    pub fn new(answers: &[&str]) -> ScriptedPrompter {
+        ScriptedPrompter {
+            answers: answers.iter().map(|answer| (*answer).to_owned()).collect(),
+            transcript: String::new(),
+            prompts: Vec::new(),
+        }
+    }
+
+    /// 還沒用掉的回答。
+    pub fn unused(&self) -> Vec<String> {
+        self.answers.iter().cloned().collect()
+    }
+}
+
+impl purrdr_host_service::install::interactive::Prompter for ScriptedPrompter {
+    fn say(&mut self, text: &str) {
+        self.transcript.push_str(text);
+        self.transcript.push('\n');
+    }
+
+    fn read_line(&mut self, prompt: &str) -> Option<String> {
+        self.prompts.push(prompt.to_owned());
+        self.transcript.push_str(prompt);
+        let answer = self.answers.pop_front()?;
+        self.transcript.push_str(&answer);
+        self.transcript.push('\n');
+        Some(answer)
+    }
+}
