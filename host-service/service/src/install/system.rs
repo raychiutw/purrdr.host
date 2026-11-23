@@ -31,6 +31,60 @@ pub trait HostSystem {
 /// 只由本機的 install／uninstall／status 指令使用，WebSocket 連線碰不到。
 pub struct ProcessHostSystem;
 
+/// 這個行程的系統操作。`--json` 時 stdout 只放最後那個 JSON 物件，
+/// 所以接上終端機執行的子行程(例如 `tailscale serve --bg`)的 stdout 改導到 stderr。
+pub struct CliHostSystem {
+    pub json: bool,
+}
+
+impl HostSystem for CliHostSystem {
+    fn run(&mut self, program: &str, arguments: &[String]) -> std::io::Result<CommandOutput> {
+        ProcessHostSystem.run(program, arguments)
+    }
+
+    fn run_attached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<bool> {
+        if !self.json {
+            return ProcessHostSystem.run_attached(program, arguments);
+        }
+        let mut command = Command::new(program);
+        command.args(arguments);
+        if let Some(stderr) = stderr_stdio() {
+            command.stdout(stderr);
+        }
+        Ok(command.status()?.success())
+    }
+
+    fn spawn_detached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<()> {
+        ProcessHostSystem.spawn_detached(program, arguments)
+    }
+
+    fn remove_directory_after_exit(&mut self, directory: &Path, empty_directories: &[PathBuf]) -> std::io::Result<()> {
+        ProcessHostSystem.remove_directory_after_exit(directory, empty_directories)
+    }
+
+    fn user_path(&mut self) -> std::io::Result<Option<String>> {
+        ProcessHostSystem.user_path()
+    }
+
+    fn set_user_path(&mut self, value: Option<&str>) -> std::io::Result<()> {
+        ProcessHostSystem.set_user_path(value)
+    }
+}
+
+/// 複製一份指向本行程 stderr 的 handle，給子行程當 stdout;複製失敗時 `None`(維持原本的 stdout)。
+fn stderr_stdio() -> Option<Stdio> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsFd as _;
+        std::io::stderr().as_fd().try_clone_to_owned().ok().map(Stdio::from)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsHandle as _;
+        std::io::stderr().as_handle().try_clone_to_owned().ok().map(Stdio::from)
+    }
+}
+
 /// 背景自動更新：以獨立程序執行 `<執行檔> update --yes`。服務重啟時會結束自己的程序，
 /// 所以更新程序要脫離它：Linux 放進另一個 systemd unit(同一個 cgroup 會一起被結束，所以 `systemd_run` 失敗就回報、不改用別的方式),
 /// macOS 另開 process group(launchd 只結束 job 的 group),Windows 是不同的執行檔名稱(重啟只結束背景執行檔)。

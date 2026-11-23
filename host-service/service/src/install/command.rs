@@ -7,7 +7,7 @@ use super::interactive::{TerminalPrompter, install_interactively};
 use super::location::InstalledService;
 use super::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
 use super::settings::{InstallSettings, RequestedSettings, SettingsError, assume_yes};
-use super::system::{CommandOutput, HostSystem, ProcessHostSystem};
+use super::system::{CliHostSystem, ProcessHostSystem};
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
 use crate::herdr_socket::SocketEnvironment;
 use crate::update::{HttpReleaseSource, UpdateError, UpdateOutcome, Updater};
@@ -40,7 +40,7 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
         .unwrap_or_else(|| format!("{} install", shell_quoted(&environment.current_executable, environment.platform)));
     let platform = environment.platform;
     let rerun = rerun_install_command(&rerun_prefix, &command, platform);
-    let mut installer = Installer::new(environment, CliSystem { json });
+    let mut installer = Installer::new(environment, CliHostSystem { json });
     match command {
         InstallCommand::Install { .. } => {
             let environment = |name: &str| std::env::var(name).ok();
@@ -126,60 +126,6 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
             println!("{}", installer.status(&SocketEnvironment::from_process()).await);
             ExitCode::SUCCESS
         }
-    }
-}
-
-/// 這個行程的系統操作。`--json` 時 stdout 只放最後那個 JSON 物件，
-/// 所以接上終端機執行的子行程(例如 `tailscale serve --bg`)的 stdout 改導到 stderr。
-struct CliSystem {
-    json: bool,
-}
-
-impl HostSystem for CliSystem {
-    fn run(&mut self, program: &str, arguments: &[String]) -> std::io::Result<CommandOutput> {
-        ProcessHostSystem.run(program, arguments)
-    }
-
-    fn run_attached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<bool> {
-        if !self.json {
-            return ProcessHostSystem.run_attached(program, arguments);
-        }
-        let mut command = std::process::Command::new(program);
-        command.args(arguments);
-        if let Some(stderr) = stderr_stdio() {
-            command.stdout(stderr);
-        }
-        Ok(command.status()?.success())
-    }
-
-    fn spawn_detached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<()> {
-        ProcessHostSystem.spawn_detached(program, arguments)
-    }
-
-    fn remove_directory_after_exit(&mut self, directory: &std::path::Path, empty_directories: &[std::path::PathBuf]) -> std::io::Result<()> {
-        ProcessHostSystem.remove_directory_after_exit(directory, empty_directories)
-    }
-
-    fn user_path(&mut self) -> std::io::Result<Option<String>> {
-        ProcessHostSystem.user_path()
-    }
-
-    fn set_user_path(&mut self, value: Option<&str>) -> std::io::Result<()> {
-        ProcessHostSystem.set_user_path(value)
-    }
-}
-
-/// 複製一份指向本行程 stderr 的 handle，給子行程當 stdout;複製失敗時 `None`(維持原本的 stdout)。
-fn stderr_stdio() -> Option<std::process::Stdio> {
-    #[cfg(unix)]
-    {
-        use std::os::fd::AsFd as _;
-        std::io::stderr().as_fd().try_clone_to_owned().ok().map(std::process::Stdio::from)
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsHandle as _;
-        std::io::stderr().as_handle().try_clone_to_owned().ok().map(std::process::Stdio::from)
     }
 }
 
