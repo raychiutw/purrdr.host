@@ -11,14 +11,18 @@ mod autostart;
 mod command;
 mod command_alias;
 mod herdr_shortcut;
+pub mod interactive;
 mod location;
+pub mod non_interactive;
+pub mod settings;
 pub mod system;
 mod tailscale;
 mod user_path;
 
-pub use command::run_command;
+pub use command::{report_invalid_arguments, run_command};
 pub use command_alias::CommandAlias;
 pub use location::{HelperLauncher, InstalledService};
+use settings::yes_no;
 use system::HostSystem;
 use tailscale::Tailscale;
 
@@ -86,11 +90,10 @@ pub struct HostStatus {
 
 impl std::fmt::Display for HostStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let yes_no = |value: bool| if value { "yes" } else { "no" };
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
         if let Some(auto_update) = self.auto_update {
-            writeln!(formatter, "  auto update: {}", if auto_update { "on" } else { "off" })?;
+            writeln!(formatter, "  auto update: {}", settings::on_off(auto_update))?;
         }
         writeln!(formatter, "  logs: {}", self.log_directory.display())?;
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
@@ -134,7 +137,7 @@ impl HostEnvironment {
     pub fn resolve(platform: InstallPlatform, variable: impl Fn(&str) -> Option<String>, current_executable: PathBuf) -> Result<Self, InstallError> {
         let non_empty = |name: &str| variable(name).filter(|value| !value.is_empty());
         let home_variable = if platform == InstallPlatform::Windows { "USERPROFILE" } else { "HOME" };
-        let home = non_empty(home_variable).ok_or_else(|| InstallError::Io(format!("{home_variable} is not set")))?;
+        let home = non_empty(home_variable).ok_or_else(|| InstallError::HostEnvironment(format!("{home_variable} is not set")))?;
         Ok(HostEnvironment {
             platform,
             home: PathBuf::from(home),
@@ -149,7 +152,7 @@ impl HostEnvironment {
 
     /// 這個行程的主機資訊。
     pub fn from_process() -> Result<Self, InstallError> {
-        let current_executable = std::env::current_exe().map_err(InstallError::io)?;
+        let current_executable = std::env::current_exe().map_err(|error| InstallError::HostEnvironment(format!("cannot find this program: {error}")))?;
         Self::resolve(InstallPlatform::current(), |name| std::env::var(name).ok(), current_executable)
     }
 }
@@ -158,15 +161,18 @@ impl HostEnvironment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallCommand {
     Install {
-        port: u16,
+        /// `--port`;沒指定時依 `PURRDR_PORT`、上次安裝、預設值。
+        port: Option<u16>,
         herdr_session: Option<String>,
-        /// `tailscale serve` 的 HTTPS 埠;沒指定時沿用上次安裝，或 443。
+        /// `tailscale serve` 的 HTTPS 埠;沒指定時依環境變數、上次安裝，或 443。
         https_port: Option<u16>,
         assume_yes: bool,
-        /// `--no-auto-update`:關閉自動更新。
-        no_auto_update: bool,
-        /// `--no-path`:不加進使用者 PATH。
-        no_path: bool,
+        /// `--json`:結果以單一 JSON 物件輸出到 stdout，隱含不詢問(但不算同意憑證公開)。
+        json: bool,
+        /// `--auto-update`(`Some(true)`)／`--no-auto-update`(`Some(false)`)。
+        auto_update: Option<bool>,
+        /// `--path`(`Some(true)`)／`--no-path`(`Some(false)`)。
+        add_to_path: Option<bool>,
     },
     Uninstall,
     Status,
@@ -218,15 +224,23 @@ impl InstallCommand {
     }
 
     fn parse_install(options: &[String]) -> Result<Self, String> {
-        let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (crate::DEFAULT_PORT, None, None, false);
-        let (mut no_auto_update, mut no_path) = (false, false);
+        let (mut port, mut herdr_session, mut https_port, mut assume_yes, mut json) = (None, None, None, false, false);
+        let (mut auto_update, mut add_to_path): (Option<bool>, Option<bool>) = (None, None);
+        // 成對開關互相矛盾時報錯，不靜默以後者為準。
+        let pair = |slot: &mut Option<bool>, value: bool, on: &str, off: &str| match *slot {
+            Some(earlier) if earlier != value => Err(format!("conflicting options: {on} and {off}")),
+            _ => {
+                *slot = Some(value);
+                Ok(())
+            }
+        };
         let mut remaining = options.iter();
         while let Some(option) = remaining.next() {
             let mut value = || remaining.next().ok_or_else(|| format!("{option} needs a value"));
             match option.as_str() {
                 "--port" => {
                     let text = value()?;
-                    port = text.parse().map_err(|_| format!("invalid port: {text}"))?;
+                    port = Some(text.parse().ok().filter(|port| *port != 0).ok_or_else(|| format!("invalid port: {text}"))?);
                 }
                 "--https-port" => {
                     let text = value()?;
@@ -239,8 +253,11 @@ impl InstallCommand {
                 }
                 "--session" => herdr_session = Some(value()?.clone()),
                 "--yes" => assume_yes = true,
-                "--no-auto-update" => no_auto_update = true,
-                "--no-path" => no_path = true,
+                "--json" => json = true,
+                "--auto-update" => pair(&mut auto_update, true, "--auto-update", "--no-auto-update")?,
+                "--no-auto-update" => pair(&mut auto_update, false, "--auto-update", "--no-auto-update")?,
+                "--path" => pair(&mut add_to_path, true, "--path", "--no-path")?,
+                "--no-path" => pair(&mut add_to_path, false, "--path", "--no-path")?,
                 other => return Err(format!("unknown argument: {other}")),
             }
         }
@@ -249,32 +266,64 @@ impl InstallCommand {
             herdr_session,
             https_port,
             assume_yes,
-            no_auto_update,
-            no_path,
+            json,
+            auto_update,
+            add_to_path,
         })
+    }
+
+    /// 同一個指令加上 `--yes`(同意憑證公開後重跑用)。
+    pub fn agreeing(&self) -> Self {
+        let mut command = self.clone();
+        if let InstallCommand::Install { assume_yes, .. } = &mut command {
+            *assume_yes = true;
+        }
+        command
     }
 }
 
 /// `install` 的選項。
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
-    pub port: u16,
-    pub herdr_session: Option<String>,
-    /// `--https-port`;`None` 時沿用上次安裝的埠，或 443。
-    pub https_port: Option<u16>,
-    /// `--no-auto-update` 時 `Some(false)`;`None` 時沿用上次安裝，或開啟。
-    pub auto_update: Option<bool>,
-    /// `--no-path` 時 `Some(false)`;`None` 時沿用上次安裝，或加進 PATH。
-    pub add_to_path: Option<bool>,
+    /// 參數或環境變數明確指定的設定;其餘沿用上次安裝，或用預設值。
+    pub requested: settings::RequestedSettings,
     /// 放下載的執行檔的資料夾。
     pub source_directory: PathBuf,
+}
+
+/// 建議 HTTPS 埠時跳過的候選埠，與占用它的服務(`tailscale serve` 的 `路徑 -> 目標`)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedHttpsPort {
+    pub port: u16,
+    pub handlers: String,
+}
+
+/// 被跳過的候選埠與占用者,例如 `443 is used by / -> http://127.0.0.1:8765; 8443 is used by …`。
+pub fn describe_skipped(skipped: &[SkippedHttpsPort]) -> String {
+    skipped
+        .iter()
+        .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// HTTPS 埠的建議值：`port` 是第一個可用的候選埠(沒有時 `None`),`skipped` 是它前面被別人占用的候選埠。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsPortSuggestion {
+    pub port: Option<u16>,
+    pub skipped: Vec<SkippedHttpsPort>,
 }
 
 /// 安裝途中要使用者同意的事。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstallQuestion {
     /// 沒指定 `--https-port`,預設的埠已被別的服務占用：改用 `alternative`?
-    UseAnotherHttpsPort { taken_port: u16, handlers: String, alternative: u16 },
+    UseAnotherHttpsPort {
+        taken_port: u16,
+        handlers: String,
+        alternative: u16,
+        skipped: Vec<SkippedHttpsPort>,
+    },
     /// 主機名稱會進 Certificate Transparency 公開紀錄。
     CertificateTransparency { host_name: String },
 }
@@ -286,6 +335,7 @@ impl std::fmt::Display for InstallQuestion {
                 taken_port,
                 handlers,
                 alternative,
+                ..
             } => write!(
                 formatter,
                 "tailscale serve already uses HTTPS {taken_port} for another service ({handlers}). \
@@ -295,6 +345,37 @@ impl std::fmt::Display for InstallQuestion {
         }
     }
 }
+
+/// 預設或指定的 HTTPS 埠已被別的服務占用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HttpsPortConflict {
+    /// 被占用的埠。
+    pub port: u16,
+    /// 占用它的服務(`tailscale serve` 的 `路徑 -> 目標`)。
+    pub handlers: String,
+    /// 建議改用的埠前面被別人占用的候選埠(含 `port` 本身)。
+    pub skipped: Vec<SkippedHttpsPort>,
+}
+
+/// 安裝前的計畫：照目前的設定安裝會是什麼樣子;唯讀，不改系統。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallPlan {
+    /// 採用的設定;預設的 HTTPS 埠被占用時 `https_port` 已是建議的替代埠。
+    pub settings: settings::InstallSettings,
+    pub host_name: String,
+    pub https_address: String,
+    /// 已經安裝過(重新安裝)。
+    pub reinstall: bool,
+    /// HTTPS 埠被占用的情形;沒有占用時 `None`。
+    pub https_port_conflict: Option<HttpsPortConflict>,
+    /// 這次要提醒主機名稱會公開(第一次安裝，或主機名稱和上次不同)。
+    pub certificate_notice: bool,
+}
+
+/// 說明網頁的安裝參數總表。
+pub const INSTALL_OPTIONS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/#install-options";
+/// 給 AI agent 看的純文字說明。
+pub const LLMS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/llms.txt";
 
 /// 安裝完成。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -306,10 +387,19 @@ pub struct Installed {
     pub pair_command: String,
     /// `bin/` 已加進使用者 PATH(`--no-path` 時 false)。
     pub added_to_path: bool,
+    /// 這次安裝最後採用的設定與各自的來源。
+    pub settings: settings::InstallSettings,
     /// 在 herdr 裡顯示配對 QR code 的快捷鍵;沒加(按鍵已被使用者占用)時是 None。
     pub herdr_shortcut: Option<String>,
     /// `bin/` 有指令別名 `purrdr`(raychiutw/purrdr.host#53)。
     pub command_alias: bool,
+}
+
+impl Installed {
+    /// 每一項最後採用的值與來源(沒辦法詢問時印出，讓使用者知道裝了什麼)。
+    pub fn settings_summary(&self) -> String {
+        self.settings.summary()
+    }
 }
 
 impl std::fmt::Display for Installed {
@@ -340,6 +430,16 @@ impl std::fmt::Display for Installed {
             let name = if self.command_alias { command_alias::NAME } else { "purrdr-host-service" };
             write!(formatter, "\nAdded to your PATH: open a new terminal to run {name} directly.")?;
         }
+        // 之後怎麼改：沒加 PATH(或沒有別名)時用完整路徑，複製貼上才打得到。
+        let command = if short_name {
+            command_alias::NAME.to_owned()
+        } else {
+            self.pair_command.strip_suffix(" pair").unwrap_or(&self.pair_command).to_owned()
+        };
+        write!(
+            formatter,
+            "\n\nChange later:\n  Automatic updates:  {command} auto-update on|off\n  Other settings:     {command} install --<option> ...  (paired devices are kept)\n  All options:        {INSTALL_OPTIONS_URL}\n  For AI agents:      {LLMS_URL}"
+        )?;
         Ok(())
     }
 }
@@ -352,14 +452,15 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         herdr_session,
         https_port,
         assume_yes,
-        no_auto_update,
-        no_path,
+        json,
+        auto_update,
+        add_to_path,
     } = command
     else {
         return prefix.to_owned();
     };
     let mut parts = vec![prefix.to_owned()];
-    if *port != crate::DEFAULT_PORT {
+    if let Some(port) = port {
         parts.push(format!("--port {port}"));
     }
     if let Some(session) = herdr_session {
@@ -368,11 +469,18 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
     if *assume_yes {
         parts.push("--yes".to_owned());
     }
-    if *no_auto_update {
-        parts.push("--no-auto-update".to_owned());
+    match auto_update {
+        Some(true) => parts.push("--auto-update".to_owned()),
+        Some(false) => parts.push("--no-auto-update".to_owned()),
+        None => {}
     }
-    if *no_path {
-        parts.push("--no-path".to_owned());
+    match add_to_path {
+        Some(true) => parts.push("--path".to_owned()),
+        Some(false) => parts.push("--no-path".to_owned()),
+        None => {}
+    }
+    if *json {
+        parts.push("--json".to_owned());
     }
     if let Some(https_port) = https_port {
         parts.push(format!("{HTTPS_PORT_OPTION} {https_port}"));
@@ -411,6 +519,10 @@ pub enum InstallError {
     },
     /// 使用者看過 Certificate Transparency 的說明後取消。
     Declined,
+    /// 沒辦法詢問、也沒有 `--yes`:需要同意(`notice` 是要同意的說明)，什麼都沒改。
+    ConsentRequired {
+        notice: String,
+    },
     /// 這個 HTTPS 埠已經轉到別的服務;`available` 是可以改用的埠。
     ServePortTaken {
         https_port: u16,
@@ -426,6 +538,12 @@ pub enum InstallError {
     Autostart(String),
     NotInstalled,
     Io(String),
+    /// 命令列參數不合法(`--json` 時也以 JSON 回報)。
+    InvalidArguments(String),
+    /// `PURRDR_*` 環境變數的值不合法。
+    InvalidEnvironment(settings::SettingsError),
+    /// 抓不到執行安裝需要的主機資訊(例如家目錄的環境變數沒設)。
+    HostEnvironment(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -463,6 +581,10 @@ impl InstallError {
                  Next: fix the problem above, {then_rerun}"
             ),
             InstallError::Declined => "Install cancelled; nothing was changed.".to_owned(),
+            InstallError::ConsentRequired { notice } => format!(
+                "{notice}\n\nThis install needs your consent and cannot ask (no terminal, CI, or --json), so nothing was changed.\n\
+                 Next: to agree, run the install again with --yes:\n  {rerun}"
+            ),
             InstallError::ServePortTaken {
                 https_port,
                 handlers,
@@ -496,6 +618,31 @@ impl InstallError {
             ),
             InstallError::Io(message) => format!("{message}\nNext: fix the problem above, {then_rerun}"),
             InstallError::NotInstalled => "The Purrdr host service is not installed.".to_owned(),
+            InstallError::InvalidArguments(message) => format!("{message}\nNext: see the install options with:\n  {rerun}"),
+            InstallError::InvalidEnvironment(error) => error.explain(rerun),
+            InstallError::HostEnvironment(message) => format!("{message}\nNext: run the install from a normal user session (with HOME or USERPROFILE set)."),
+        }
+    }
+
+    /// 機器可讀的錯誤種類(`--json` 的 `error.kind`)。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            InstallError::TailscaleMissing => "tailscale_missing",
+            InstallError::TailscaleNotRunning(_) => "tailscale_not_running",
+            InstallError::MagicDnsDisabled => "magic_dns_disabled",
+            InstallError::HttpsCertificatesDisabled => "https_certificates_disabled",
+            InstallError::ServeFailed { .. } => "serve_failed",
+            InstallError::Declined => "declined",
+            InstallError::ConsentRequired { .. } => "consent_required",
+            InstallError::ServePortTaken { .. } => "https_port_taken",
+            InstallError::ServeChanged { .. } => "serve_changed",
+            InstallError::Tailscale(_) => "tailscale_error",
+            InstallError::Autostart(_) => "autostart_failed",
+            InstallError::NotInstalled => "not_installed",
+            InstallError::Io(_) => "io_error",
+            InstallError::InvalidArguments(_) => "invalid_arguments",
+            InstallError::InvalidEnvironment(_) => "invalid_environment",
+            InstallError::HostEnvironment(_) => "host_environment",
         }
     }
 
@@ -596,6 +743,24 @@ struct InstallRecord {
     herdr_shortcut: herdr_shortcut::ShortcutChange,
 }
 
+impl InstallRecord {
+    /// 上次安裝時的主機名稱(取自 HTTPS 網址)。
+    fn host_name(&self) -> &str {
+        let address = self.https_address.strip_prefix("https://").unwrap_or(&self.https_address);
+        address.split([':', '/']).next().unwrap_or_default()
+    }
+
+    fn settings_snapshot(&self) -> settings::PreviousSettings {
+        settings::PreviousSettings {
+            port: self.port,
+            https_port: self.https_port,
+            herdr_session: self.herdr_session.clone(),
+            auto_update: self.auto_update,
+            add_to_path: self.add_to_path,
+        }
+    }
+}
+
 fn enabled() -> bool {
     true
 }
@@ -624,16 +789,32 @@ enum PortUse {
 pub struct Installer<S: HostSystem> {
     environment: HostEnvironment,
     system: S,
+    /// 最近一次 `install` 已解析到的設定(安裝失敗時仍可讀，讓呼叫端說明各項設定與來源)。
+    attempted: Option<settings::InstallSettings>,
 }
 
 impl<S: HostSystem> Installer<S> {
     pub fn new(environment: HostEnvironment, system: S) -> Self {
-        Installer { environment, system }
+        Installer {
+            environment,
+            system,
+            attempted: None,
+        }
     }
 
     /// 安裝用的系統(測試檢查假系統狀態)。
     pub fn system(&self) -> &S {
         &self.system
+    }
+
+    /// 安裝用的系統(測試調整假系統狀態)。
+    pub fn system_mut(&mut self) -> &mut S {
+        &mut self.system
+    }
+
+    /// 最近一次 `install` 已解析到的設定;還沒解析到(例如讀安裝紀錄就失敗)時 `None`。
+    pub fn attempted_settings(&self) -> Option<&settings::InstallSettings> {
+        self.attempted.as_ref()
     }
 
     /// 取回安裝用的系統(測試接著交給更新流程)。
@@ -650,50 +831,58 @@ impl<S: HostSystem> Installer<S> {
     pub fn install(&mut self, options: &InstallOptions, mut confirm: impl FnMut(&InstallQuestion) -> bool) -> Result<Installed, InstallError> {
         let layout = self.layout();
         let previous = self.read_record(&layout)?;
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        self.attempted = Some(settings.clone());
         let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
         let host_name = tailscale.host_name(&mut self.system)?;
-        let preferred = options
-            .https_port
-            .or(previous.as_ref().map(|record| record.https_port))
-            .unwrap_or(tailscale::DEFAULT_HTTPS_PORT);
-        let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, options.port, previous.as_ref())? {
+        let preferred = settings.https_port.value;
+        let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
             PortUse::Free => (preferred, false),
             PortUse::Ours { in_place } => (preferred, in_place),
             PortUse::Taken(handlers) => {
-                let available = self.first_free_https_port(&tailscale, preferred, options.port, previous.as_ref())?;
+                let suggestion = self.suggest_https_port_with(&tailscale, settings.port.value, previous.as_ref())?;
+                let available = suggestion.port.filter(|candidate| *candidate != preferred);
                 let taken = InstallError::ServePortTaken {
                     https_port: preferred,
                     handlers: handlers.clone(),
                     available,
                 };
                 // 使用者指定的埠不擅自換掉。
-                let Some(alternative) = available.filter(|_| options.https_port.is_none()) else {
+                let Some(alternative) = available.filter(|_| !settings.https_port.is_explicit()) else {
                     return Err(taken);
                 };
                 let question = InstallQuestion::UseAnotherHttpsPort {
                     taken_port: preferred,
                     handlers,
                     alternative,
+                    skipped: suggestion.skipped,
                 };
                 if !confirm(&question) {
                     return Err(taken);
                 }
+                settings.https_port = settings::Sourced {
+                    value: alternative,
+                    source: settings::Source::Suggested,
+                };
+                self.attempted = Some(settings.clone());
                 (alternative, false)
             }
         };
-        if !confirm(&InstallQuestion::CertificateTransparency { host_name: host_name.clone() }) {
+        // 主機名稱和上次安裝相同就不再提醒。
+        let host_name_changed = previous.as_ref().is_none_or(|record| record.host_name() != host_name);
+        if host_name_changed && !confirm(&InstallQuestion::CertificateTransparency { host_name: host_name.clone() }) {
             return Err(InstallError::Declined);
         }
 
         let mut record = InstallRecord {
-            port: options.port,
-            herdr_session: options.herdr_session.clone(),
+            port: settings.port.value,
+            herdr_session: settings.herdr_session.value.clone(),
             https_port,
             https_address: tailscale::https_address(&host_name, https_port),
             serve_configured: previous.as_ref().is_some_and(|record| record.serve_configured),
             created_directories: previous.as_ref().map(|record| record.created_directories.clone()).unwrap_or_default(),
-            auto_update: options.auto_update.or(previous.as_ref().map(|record| record.auto_update)).unwrap_or(true),
-            add_to_path: options.add_to_path.or(previous.as_ref().map(|record| record.add_to_path)).unwrap_or(true),
+            auto_update: settings.auto_update.value,
+            add_to_path: settings.add_to_path.value,
             path: previous.as_ref().map(|record| record.path.clone()).unwrap_or_default(),
             herdr_shortcut: previous.as_ref().map(|record| record.herdr_shortcut.clone()).unwrap_or_default(),
         };
@@ -741,9 +930,100 @@ impl<S: HostSystem> Installer<S> {
             warnings,
             pair_command: format!("{} pair", shell_quoted(&layout.executable(), self.environment.platform)),
             added_to_path: record.add_to_path,
+            settings,
             herdr_shortcut,
             command_alias,
         })
+    }
+
+    /// 照目前的設定安裝會是什麼樣子(互動安裝的摘要);唯讀，不改系統。
+    pub fn plan(&mut self, options: &InstallOptions) -> Result<InstallPlan, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        let host_name = tailscale.host_name(&mut self.system)?;
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        let preferred = settings.https_port.value;
+        let mut https_port_conflict = None;
+        if let PortUse::Taken(handlers) = self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
+            let suggestion = self.suggest_https_port_with(&tailscale, settings.port.value, previous.as_ref())?;
+            let alternative = suggestion
+                .port
+                .filter(|candidate| *candidate != preferred && !settings.https_port.is_explicit());
+            let skipped = match alternative {
+                Some(_) => suggestion.skipped,
+                None => vec![SkippedHttpsPort {
+                    port: preferred,
+                    handlers: handlers.clone(),
+                }],
+            };
+            if let Some(alternative) = alternative {
+                settings.https_port = settings::Sourced {
+                    value: alternative,
+                    source: settings::Source::Suggested,
+                };
+            }
+            https_port_conflict = Some(HttpsPortConflict {
+                port: preferred,
+                handlers,
+                skipped,
+            });
+        }
+        Ok(InstallPlan {
+            https_address: tailscale::https_address(&host_name, settings.https_port.value),
+            certificate_notice: previous.as_ref().is_none_or(|record| record.host_name() != host_name),
+            reinstall: previous.is_some(),
+            settings,
+            host_name,
+            https_port_conflict,
+        })
+    }
+
+    /// `https_port` 被別的服務占用時回占用它的服務(本機埠 `port`);空的或已是自己的回 `None`。唯讀。
+    pub fn https_port_taken_by(&mut self, https_port: u16, port: u16) -> Result<Option<String>, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        Ok(match self.check_https_port(&tailscale, https_port, port, previous.as_ref())? {
+            PortUse::Taken(handlers) => Some(handlers),
+            PortUse::Free | PortUse::Ours { .. } => None,
+        })
+    }
+
+    /// 沒指定 HTTPS 埠時的建議值(本機埠 `port`);唯讀，不改系統。
+    pub fn suggest_https_port(&mut self, port: u16) -> Result<HttpsPortSuggestion, InstallError> {
+        let layout = self.layout();
+        let previous = self.read_record(&layout)?;
+        let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
+        self.suggest_https_port_with(&tailscale, port, previous.as_ref())
+    }
+
+    fn suggest_https_port_with(&mut self, tailscale: &Tailscale, port: u16, previous: Option<&InstallRecord>) -> Result<HttpsPortSuggestion, InstallError> {
+        // 重新安裝：上次的埠仍是自己的就不換。
+        if let Some(previous) = previous
+            && matches!(
+                self.check_https_port(tailscale, previous.https_port, port, Some(previous))?,
+                PortUse::Ours { .. }
+            )
+        {
+            return Ok(HttpsPortSuggestion {
+                port: Some(previous.https_port),
+                skipped: Vec::new(),
+            });
+        }
+        let mut skipped = Vec::new();
+        for candidate in tailscale::CANDIDATE_HTTPS_PORTS {
+            match self.check_https_port(tailscale, candidate, port, previous)? {
+                PortUse::Taken(handlers) => skipped.push(SkippedHttpsPort { port: candidate, handlers }),
+                PortUse::Free | PortUse::Ours { .. } => {
+                    return Ok(HttpsPortSuggestion {
+                        port: Some(candidate),
+                        skipped,
+                    });
+                }
+            }
+        }
+        Ok(HttpsPortSuggestion { port: None, skipped })
     }
 
     /// HTTPS 埠目前是空的、已是主機服務的，還是被別的服務占用。
@@ -762,16 +1042,6 @@ impl<S: HostSystem> Installer<S> {
             return Ok(PortUse::Ours { in_place: false });
         }
         Ok(PortUse::Taken(tailscale::describe(&handlers)))
-    }
-
-    /// 候選 HTTPS 埠中第一個可用的(跳過已被占用的 `taken`)。
-    fn first_free_https_port(&mut self, tailscale: &Tailscale, taken: u16, port: u16, previous: Option<&InstallRecord>) -> Result<Option<u16>, InstallError> {
-        for candidate in tailscale::CANDIDATE_HTTPS_PORTS.into_iter().filter(|candidate| *candidate != taken) {
-            if !matches!(self.check_https_port(tailscale, candidate, port, previous)?, PortUse::Taken(_)) {
-                return Ok(Some(candidate));
-            }
-        }
-        Ok(None)
     }
 
     fn read_record(&self, layout: &ServiceLayout) -> Result<Option<InstallRecord>, InstallError> {
@@ -806,7 +1076,7 @@ impl<S: HostSystem> Installer<S> {
 
         if !serve_in_place {
             record.serve_configured = true;
-            tailscale.serve(&mut self.system, record.https_port, options.port)?;
+            tailscale.serve(&mut self.system, record.https_port, record.port)?;
         }
 
         if record.add_to_path {

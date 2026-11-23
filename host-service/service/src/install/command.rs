@@ -1,10 +1,13 @@
 //! `install`／`uninstall`／`status`／`update`／`version` 子命令：接上真正的系統與終端機。
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
 use std::process::ExitCode;
 
+use super::interactive::{TerminalPrompter, install_interactively};
 use super::location::InstalledService;
-use super::system::ProcessHostSystem;
+use super::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
+use super::settings::{InstallSettings, RequestedSettings, SettingsError, assume_yes};
+use super::system::{CliHostSystem, ProcessHostSystem};
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
 use crate::herdr_socket::SocketEnvironment;
 use crate::update::{HttpReleaseSource, UpdateError, UpdateOutcome, Updater};
@@ -14,8 +17,10 @@ pub const INSTALL_COMMAND_VARIABLE: &str = "PURRDR_HOST_SERVICE_INSTALL_COMMAND"
 
 /// 執行子命令並回傳結束碼。
 pub async fn run_command(command: InstallCommand) -> ExitCode {
+    let json = matches!(command, InstallCommand::Install { json: true, .. });
     let environment = match HostEnvironment::from_process() {
         Ok(environment) => environment,
+        Err(error) if json => return fail_install_json(&error, "purrdr-host-service install --json", None, ExitCode::FAILURE),
         Err(error) => return fail(&error),
     };
     if let InstallCommand::Update { check_only, assume_yes } = command {
@@ -33,48 +38,75 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
         .ok()
         .filter(|prefix| !prefix.trim().is_empty())
         .unwrap_or_else(|| format!("{} install", shell_quoted(&environment.current_executable, environment.platform)));
-    let rerun = rerun_install_command(&rerun_prefix, &command, environment.platform);
-    let mut installer = Installer::new(environment, ProcessHostSystem);
+    let platform = environment.platform;
+    let rerun = rerun_install_command(&rerun_prefix, &command, platform);
+    let mut installer = Installer::new(environment, CliHostSystem { json });
     match command {
-        InstallCommand::Install {
-            port,
-            herdr_session,
-            https_port,
-            assume_yes,
-            no_auto_update,
-            no_path,
-        } => {
-            let options = InstallOptions {
-                port,
-                herdr_session,
-                https_port,
-                auto_update: no_auto_update.then_some(false),
-                add_to_path: no_path.then_some(false),
-                source_directory,
-            };
-            let confirm = |question: &InstallQuestion| {
-                println!("{question}");
-                let prompt = match question {
-                    InstallQuestion::UseAnotherHttpsPort { alternative, .. } => format!("Use HTTPS {alternative}? [y/N] "),
-                    InstallQuestion::CertificateTransparency { .. } => "Continue? [y/N] ".to_owned(),
-                };
-                if assume_yes {
-                    println!("{prompt}yes (--yes)");
-                    return true;
+        InstallCommand::Install { .. } => {
+            let environment = |name: &str| std::env::var(name).ok();
+            // `--json` 時 stdout 只放最後那個 JSON 物件，人類看的訊息一律走 stderr。
+            let fail_install = |error: &InstallError, rerun: &str, settings: Option<&InstallSettings>| {
+                if json {
+                    fail_install_json(error, rerun, settings, ExitCode::FAILURE)
+                } else {
+                    // 沒辦法詢問時，中途停止也讓使用者看到已解析到的各項設定與來源。
+                    if let Some(settings) = settings {
+                        eprintln!("{}\n", settings.summary());
+                    }
+                    eprintln!("{}", error.explain(rerun));
+                    ExitCode::FAILURE
                 }
-                ask(&prompt)
             };
-            match installer.install(&options, confirm) {
+            // 環境變數不合法:重跑指令要先清掉那個變數。
+            let fail_invalid_environment = |error: SettingsError| {
+                let rerun = error.rerun_without_variable(&rerun, platform);
+                fail_install(&InstallError::InvalidEnvironment(error), &rerun, None)
+            };
+            let requested = match RequestedSettings::resolve(&command, environment) {
+                Ok(requested) => requested,
+                Err(error) => return fail_invalid_environment(error),
+            };
+            let assume_yes = match assume_yes(&command, environment) {
+                Ok(assume_yes) => assume_yes,
+                Err(error) => return fail_invalid_environment(error),
+            };
+            let options = InstallOptions { requested, source_directory };
+            let interactive = asks_questions(assume_yes, json, environment, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
+            let result = if interactive {
+                install_interactively(&mut installer, options, &mut TerminalPrompter)
+            } else {
+                // 不詢問:同意的問題照實印出(--json 時印到 stderr)。
+                let announce = |question: &InstallQuestion| {
+                    if json {
+                        eprintln!("{question}\nContinuing because of --yes.");
+                    } else {
+                        println!("{question}\nContinuing because of --yes.");
+                    }
+                };
+                install_without_prompting(&mut installer, &options, assume_yes, announce)
+            };
+            match result {
                 Ok(installed) => {
                     for warning in &installed.warnings {
                         eprintln!("warning: {warning}");
                     }
-                    println!("{installed}");
+                    if json {
+                        println!("{}", success_json(&installed));
+                    } else {
+                        if !interactive {
+                            println!("{}\n", installed.settings_summary());
+                        }
+                        println!("{installed}");
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
-                    eprintln!("{}", error.explain(&rerun));
-                    ExitCode::FAILURE
+                    // 需要同意時，重跑指令要帶 --yes(--json 不算同意)。
+                    let rerun = match error {
+                        InstallError::ConsentRequired { .. } => rerun_install_command(&rerun_prefix, &command.agreeing(), platform),
+                        _ => rerun,
+                    };
+                    fail_install(&error, &rerun, if interactive { None } else { installer.attempted_settings() })
                 }
             }
         }
@@ -203,6 +235,26 @@ fn run_update(environment: HostEnvironment, check_only: bool, assume_yes: bool) 
 fn fail_update(error: &UpdateError, rerun: &str) -> ExitCode {
     eprintln!("{}", error.explain(rerun));
     ExitCode::FAILURE
+}
+
+/// `--json` 的失敗:stdout 只印一個 JSON 物件。
+fn fail_install_json(error: &InstallError, rerun: &str, settings: Option<&InstallSettings>, code: ExitCode) -> ExitCode {
+    println!("{}", failure_json(error, rerun, settings));
+    code
+}
+
+/// 命令列參數解析失敗(結束碼 2)。`install --json` 時也以 JSON 回報，其他情況印到 stderr。
+pub fn report_invalid_arguments(arguments: &[String], message: &str) -> ExitCode {
+    if arguments.first().is_some_and(|name| name == "install") && arguments.iter().any(|argument| argument == "--json") {
+        return fail_install_json(
+            &InstallError::InvalidArguments(message.to_owned()),
+            "purrdr-host-service help",
+            None,
+            ExitCode::from(2),
+        );
+    }
+    eprintln!("{message}");
+    ExitCode::from(2)
 }
 
 fn fail(error: &InstallError) -> ExitCode {

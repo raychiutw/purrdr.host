@@ -5,7 +5,7 @@ mod install_support;
 
 use install_support::{FakeSystem, TestHost, snapshot};
 
-use purrdr_host_service::install::{InstallOptions, InstallPlatform, Installer};
+use purrdr_host_service::install::{InstallPlatform, Installer};
 
 const PORT: u16 = 47_820;
 
@@ -82,10 +82,7 @@ fn no_path_option_skips_path_and_is_kept_when_installing_again() {
     let host = TestHost::new(InstallPlatform::Windows);
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
     installer.install(&host.options(PORT), |_| true).unwrap();
-    let without_path = InstallOptions {
-        add_to_path: Some(false),
-        ..host.options(PORT)
-    };
+    let without_path = host.options_without_path(PORT);
 
     installer.install(&without_path, |_| true).unwrap();
     let after_option = installer.system().state.user_path.clone();
@@ -120,10 +117,7 @@ fn installed_message_says_to_open_a_new_terminal_unless_no_path() {
     let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
 
     let with_path = installer.install(&host.options(PORT), |_| true).unwrap().to_string();
-    let without_path = InstallOptions {
-        add_to_path: Some(false),
-        ..host.options(PORT)
-    };
+    let without_path = host.options_without_path(PORT);
     let skipped = installer.install(&without_path, |_| true).unwrap().to_string();
 
     // 指令名稱(purrdr 或完整名稱)依別名有沒有建成，見 install_command_alias.rs。

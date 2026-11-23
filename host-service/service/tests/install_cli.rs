@@ -14,34 +14,37 @@ fn install_subcommands_are_parsed() {
     assert_eq!(
         InstallCommand::parse(&arguments("install")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: false,
-            no_path: false,
+            json: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --port 47999 --session work --yes")),
         Some(Ok(InstallCommand::Install {
-            port: 47_999,
+            port: Some(47_999),
             herdr_session: Some("work".into()),
             https_port: None,
             assume_yes: true,
-            no_auto_update: false,
-            no_path: false,
+            json: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --https-port 8443")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: Some(8443),
             assume_yes: false,
-            no_auto_update: false,
-            no_path: false,
+            json: false,
+            auto_update: None,
+            add_to_path: None,
         }))
     );
     assert_eq!(InstallCommand::parse(&arguments("uninstall")), Some(Ok(InstallCommand::Uninstall)));
@@ -70,23 +73,37 @@ fn install_subcommands_are_parsed() {
     assert_eq!(
         InstallCommand::parse(&arguments("install --no-auto-update")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: true,
-            no_path: false,
+            json: false,
+            auto_update: Some(false),
+            add_to_path: None,
         }))
     );
     assert_eq!(
         InstallCommand::parse(&arguments("install --no-path")),
         Some(Ok(InstallCommand::Install {
-            port: 47_820,
+            port: None,
             herdr_session: None,
             https_port: None,
             assume_yes: false,
-            no_auto_update: false,
-            no_path: true,
+            json: false,
+            auto_update: None,
+            add_to_path: Some(false),
+        }))
+    );
+    assert_eq!(
+        InstallCommand::parse(&arguments("install --auto-update --path")),
+        Some(Ok(InstallCommand::Install {
+            port: None,
+            herdr_session: None,
+            https_port: None,
+            assume_yes: false,
+            json: false,
+            auto_update: Some(true),
+            add_to_path: Some(true),
         }))
     );
     assert_eq!(
@@ -108,9 +125,12 @@ fn other_arguments_are_left_to_the_service_or_rejected() {
         "install --bind 0.0.0.0",
         "install --port",
         "install --port x",
+        "install --port 0",
         "install --https-port",
         "install --https-port 0",
         "install --https-port https",
+        "install --auto-update --no-auto-update",
+        "install --no-path --path",
         "uninstall --force",
         "status extra",
         "update --force",
@@ -140,7 +160,7 @@ fn home_is_userprofile_on_windows_and_home_elsewhere() {
     assert_eq!(windows.home, std::path::PathBuf::from(r"C:\Users\demo"));
     assert_eq!(linux.home, std::path::PathBuf::from("/home/demo"));
     assert_eq!(windows.user_name.as_deref(), Some("demo"));
-    assert!(matches!(missing, Err(InstallError::Io(_))));
+    assert!(matches!(missing, Err(InstallError::HostEnvironment(_))));
 }
 
 #[test]
@@ -174,4 +194,13 @@ fn process_system_removes_directory_once_this_process_lets_go() {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(!root.exists(), "{} 還在", root.display());
+}
+
+#[test]
+fn json_option_is_parsed_and_does_not_imply_yes() {
+    let Some(Ok(InstallCommand::Install { json, assume_yes, .. })) = InstallCommand::parse(&arguments("install --json")) else {
+        panic!("install --json 應該解析成功");
+    };
+    assert!(json);
+    assert!(!assume_yes);
 }

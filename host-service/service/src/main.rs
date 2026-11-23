@@ -19,7 +19,7 @@ usage: purrdr <command>  (same as purrdr-host-service <command>)
   purrdr pair [--read-only] [--address <https address>] [--wait]   show a pairing QR code
   purrdr devices                                                   list paired devices
   purrdr revoke <device id>                                        remove a paired device
-  purrdr install [--port <port>] [--https-port <port>] [--session <herdr session>] [--yes] [--no-auto-update] [--no-path]
+  purrdr install [options]                                         install or reinstall (see Install options)
   purrdr status                                                    show the service status
   purrdr update [--check] [--yes]                                  update to the latest release
   purrdr auto-update on|off                                        turn automatic updates on or off
@@ -27,6 +27,19 @@ usage: purrdr <command>  (same as purrdr-host-service <command>)
   purrdr uninstall                                                 remove the host service
 
 pair, devices and revoke also take --state-dir <dir> (default ~/.purrdr/host-service).
+
+Install options (each can also be set with an environment variable; an option wins over the variable):
+  --port <port>             local port                    PURRDR_PORT
+  --https-port <port>       HTTPS port (Tailscale Serve)  PURRDR_HTTPS_PORT
+  --session <name>          herdr session                 PURRDR_SESSION
+  --auto-update, --no-auto-update   automatic updates     PURRDR_AUTO_UPDATE=1|0
+  --path, --no-path         add bin/ to your PATH         PURRDR_ADD_TO_PATH=1|0
+  --yes                     do not ask for confirmation   PURRDR_YES=1
+  --json                    print one JSON object, never ask (still needs --yes to agree)
+Order of precedence: option > environment variable > previous install > default.
+
+All install options: https://raychiutw.github.io/purrdr/host-service/#install-options
+For AI agents:       https://raychiutw.github.io/purrdr/host-service/llms.txt
 ";
 
 #[tokio::main]
@@ -48,10 +61,7 @@ async fn main() -> ExitCode {
     if let Some(command) = InstallCommand::parse(&arguments) {
         return match command {
             Ok(command) => install::run_command(command).await,
-            Err(message) => {
-                eprintln!("{message}");
-                ExitCode::from(2)
-            }
+            Err(message) => install::report_invalid_arguments(&arguments, &message),
         };
     }
     match arguments.first().map(String::as_str) {

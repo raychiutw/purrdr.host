@@ -185,6 +185,34 @@ fn installs_verified_archive_with_arguments() {
     assert!(run.temporary_is_empty(), "暫存資料夾沒清掉");
 }
 
+/// `PURRDR_*` 環境變數原樣交給安裝程式(一行安裝在 Windows 靠它帶設定，raychiutw/purrdr.host#85)。
+fn purrdr_variables_reach_the_host_service() {
+    let release = Release::new();
+
+    let run = run_script_with(
+        &release,
+        &["--yes"],
+        &[("PURRDR_HTTPS_PORT", "9443"), ("PURRDR_AUTO_UPDATE", "0"), ("PURRDR_SESSION", "work space")],
+    );
+
+    assert!(run.output.status.success(), "{:?}", run.output);
+    let environment = std::fs::read_to_string(run.record.with_extension("env")).expect("沒有紀錄環境變數");
+    assert_eq!(environment, "PURRDR_AUTO_UPDATE=0\nPURRDR_HTTPS_PORT=9443\nPURRDR_SESSION=work space\n");
+}
+
+/// 腳本開頭的說明寫明 `PURRDR_*` 與帶設定的用法。
+fn scripts_document_how_to_pass_settings() {
+    for (name, usage) in [
+        ("install.sh", "PURRDR_HTTPS_PORT=9443 sh -s --"),
+        ("install.ps1", "$env:PURRDR_HTTPS_PORT=9443; irm"),
+    ] {
+        let text = std::fs::read_to_string(scripts_directory().join(name)).unwrap();
+        for expected in [usage, "PURRDR_PORT", "PURRDR_SESSION", "PURRDR_AUTO_UPDATE", "PURRDR_ADD_TO_PATH", "PURRDR_YES"] {
+            assert!(text.contains(expected), "{name} 缺少 {expected}");
+        }
+    }
+}
+
 fn stderr(run: &Run) -> String {
     String::from_utf8_lossy(&run.output.stderr).into_owned()
 }
@@ -300,6 +328,17 @@ fn fake_host_service(record: &str) -> std::process::ExitCode {
         .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     names.sort();
+    let mut variables: Vec<String> = std::env::vars()
+        .filter(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "PURRDR_PORT" | "PURRDR_HTTPS_PORT" | "PURRDR_SESSION" | "PURRDR_AUTO_UPDATE" | "PURRDR_ADD_TO_PATH" | "PURRDR_YES"
+            )
+        })
+        .map(|(name, value)| format!("{name}={value}\n"))
+        .collect();
+    variables.sort();
+    std::fs::write(std::path::Path::new(record).with_extension("env"), variables.concat()).unwrap();
     let rerun = std::env::var("PURRDR_HOST_SERVICE_INSTALL_COMMAND").unwrap_or_default();
     std::fs::write(record, format!("{}\nrerun: {rerun}\n{}\n", arguments.join(" "), names.join("\n"))).unwrap();
     if let Ok(reason) = std::env::var(FAILURE_VARIABLE) {
@@ -339,6 +378,8 @@ fn main() -> std::process::ExitCode {
             "unreachable_download_says_what_failed_and_what_to_do",
             unreachable_download_says_what_failed_and_what_to_do,
         ),
+        ("purrdr_variables_reach_the_host_service", purrdr_variables_reach_the_host_service),
+        ("scripts_document_how_to_pass_settings", scripts_document_how_to_pass_settings),
     ];
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let filters: Vec<&String> = arguments.iter().filter(|argument| !argument.starts_with('-')).collect();

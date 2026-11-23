@@ -90,12 +90,13 @@ fn taken_https_port_with_no_free_candidate_asks_for_a_port_of_your_choice() {
 #[test]
 fn rerun_command_repeats_every_given_option_including_the_https_port() {
     let command = InstallCommand::Install {
-        port: 47_999,
+        port: Some(47_999),
         herdr_session: Some("work".into()),
         https_port: Some(8443),
         assume_yes: true,
-        no_auto_update: true,
-        no_path: true,
+        json: false,
+        auto_update: Some(false),
+        add_to_path: Some(false),
     };
 
     let rerun = rerun_install_command("curl -fsSL https://example.test/install.sh | sh -s --", &command, InstallPlatform::Linux);
@@ -107,14 +108,32 @@ fn rerun_command_repeats_every_given_option_including_the_https_port() {
 }
 
 #[test]
+fn rerun_command_repeats_the_switches_that_turn_settings_on() {
+    let command = InstallCommand::Install {
+        port: None,
+        herdr_session: None,
+        https_port: None,
+        assume_yes: false,
+        json: false,
+        auto_update: Some(true),
+        add_to_path: Some(true),
+    };
+
+    let rerun = rerun_install_command("sh -s --", &command, InstallPlatform::Linux);
+
+    assert_eq!(rerun, "sh -s -- --auto-update --path");
+}
+
+#[test]
 fn rerun_command_quotes_a_session_name_for_the_shell_that_runs_it() {
     let command = |session: &str| InstallCommand::Install {
-        port: purrdr_host_service::DEFAULT_PORT,
+        port: None,
         herdr_session: Some(session.into()),
         https_port: None,
         assume_yes: false,
-        no_auto_update: false,
-        no_path: false,
+        json: false,
+        auto_update: None,
+        add_to_path: None,
     };
 
     let posix = rerun_install_command("sh -s --", &command("my work; rm -rf ~"), InstallPlatform::MacOs);
@@ -129,12 +148,13 @@ fn rerun_command_quotes_a_session_name_for_the_shell_that_runs_it() {
 #[test]
 fn taken_https_port_suggests_the_other_port_without_repeating_the_taken_one() {
     let command = InstallCommand::Install {
-        port: purrdr_host_service::DEFAULT_PORT,
+        port: None,
         herdr_session: None,
         https_port: Some(8443),
         assume_yes: true,
-        no_auto_update: false,
-        no_path: false,
+        json: false,
+        auto_update: None,
+        add_to_path: None,
     };
     let rerun = rerun_install_command("sh -s --", &command, InstallPlatform::Linux);
     let error = InstallError::ServePortTaken {
@@ -166,4 +186,59 @@ fn success_shows_the_https_address_and_how_to_pair() {
             "HTTPS",
         ],
     );
+}
+
+const OPTIONS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/#install-options";
+const LLMS_URL: &str = "https://raychiutw.github.io/purrdr/host-service/llms.txt";
+
+#[test]
+fn success_lists_how_to_change_settings_later_with_the_help_links() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    let installed = installer.install(&host.options_on_https_port(47_820, 8443), |_| true).unwrap();
+
+    let message = installed.to_string();
+    assert_contains_all(
+        &message,
+        &[
+            "Change later:",
+            "auto-update on|off",
+            " install --",
+            "paired devices are kept",
+            OPTIONS_URL,
+            LLMS_URL,
+        ],
+    );
+    // 配對步驟仍在「Change later」之前。
+    assert!(message.find("2. In Purrdr").unwrap() < message.find("Change later:").unwrap(), "{message}");
+}
+
+#[test]
+fn rerun_command_keeps_json_before_the_https_port() {
+    let command = InstallCommand::Install {
+        port: None,
+        herdr_session: None,
+        https_port: Some(8443),
+        assume_yes: true,
+        json: true,
+        auto_update: None,
+        add_to_path: None,
+    };
+
+    let rerun = rerun_install_command("purrdr install", &command, InstallPlatform::Linux);
+
+    assert_eq!(rerun, "purrdr install --yes --json --https-port 8443");
+}
+
+#[test]
+fn consent_required_says_nothing_changed_and_ends_with_the_rerun_that_agrees() {
+    let error = InstallError::ConsentRequired {
+        notice: "the hostname becomes public".into(),
+    };
+
+    let message = error.explain("purrdr install --yes");
+
+    assert_contains_all(&message, &["the hostname becomes public", "nothing was changed", "--yes"]);
+    assert!(message.trim_end().ends_with("purrdr install --yes"), "{message}");
 }

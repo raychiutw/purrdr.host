@@ -4,6 +4,7 @@
 #   curl -fsSL https://github.com/raychiutw/purrdr.host/releases/latest/download/install.sh | sh
 #   curl -fsSL …/install.sh | sh -s -- --yes --port 47820     # 參數原樣交給 `purrdr-host-service install`
 #   curl -fsSL …/install.sh | sh -s -- --https-port 8443      # HTTPS 443 已被其他 `tailscale serve` 服務使用時
+#   curl -fsSL …/install.sh | PURRDR_HTTPS_PORT=9443 sh -s --  # 以環境變數指定設定(放在 `sh` 前面)
 #
 # 下載這台主機的 Release 壓縮檔，以 SHA256SUMS 驗證(不符就中止、不留檔),解壓到暫存資料夾後執行
 # `purrdr-host-service install`(把執行檔複製到 ~/.purrdr/host-service/bin/ 並設定自動啟動)。已安裝時就是更新，
@@ -12,6 +13,9 @@
 # 環境變數:
 #   PURRDR_HOST_SERVICE_VERSION       指定版本(例:0.1.0);預設最新版
 #   PURRDR_HOST_SERVICE_DOWNLOAD_URL  下載來源(網址或本機資料夾;測試用)
+#   PURRDR_PORT / PURRDR_HTTPS_PORT / PURRDR_SESSION / PURRDR_AUTO_UPDATE(0|1) / PURRDR_ADD_TO_PATH(0|1) / PURRDR_YES(1)
+#                                     安裝設定(等同對應的參數;參數優先)，原樣交給安裝程式。總表:
+#                                     https://raychiutw.github.io/purrdr/host-service/#install-options
 set -eu
 
 repository="https://github.com/raychiutw/purrdr.host"
