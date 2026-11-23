@@ -18,6 +18,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
+            json: false,
             auto_update: None,
             add_to_path: None,
         }))
@@ -29,6 +30,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: Some("work".into()),
             https_port: None,
             assume_yes: true,
+            json: false,
             auto_update: None,
             add_to_path: None,
         }))
@@ -40,6 +42,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: Some(8443),
             assume_yes: false,
+            json: false,
             auto_update: None,
             add_to_path: None,
         }))
@@ -74,6 +77,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
+            json: false,
             auto_update: Some(false),
             add_to_path: None,
         }))
@@ -85,6 +89,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
+            json: false,
             auto_update: None,
             add_to_path: Some(false),
         }))
@@ -96,6 +101,7 @@ fn install_subcommands_are_parsed() {
             herdr_session: None,
             https_port: None,
             assume_yes: false,
+            json: false,
             auto_update: Some(true),
             add_to_path: Some(true),
         }))
@@ -187,4 +193,13 @@ fn process_system_removes_directory_once_this_process_lets_go() {
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(!root.exists(), "{} 還在", root.display());
+}
+
+#[test]
+fn json_option_is_parsed_and_does_not_imply_yes() {
+    let Some(Ok(InstallCommand::Install { json, assume_yes, .. })) = InstallCommand::parse(&arguments("install --json")) else {
+        panic!("install --json 應該解析成功");
+    };
+    assert!(json);
+    assert!(!assume_yes);
 }

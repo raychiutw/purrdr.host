@@ -108,3 +108,91 @@ fn help_lists_every_install_option_environment_variable_and_the_help_links() {
     }
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
+
+/// 假的 `tailscale`(只放在 PATH 最前面):`version` 成功、`status --json` 回 `state`、`serve status --json` 回空。
+/// 其他子命令一律失敗,所以測試若走到真的設定 serve 會馬上看到。
+#[cfg(unix)]
+fn fake_tailscale(directory: &TempDirectory, state: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = directory.0.join("fake-bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = bin.join("tailscale");
+    let status = format!(
+        r#"{{"BackendState":"{state}","Self":{{"DNSName":"studio.tail1234.ts.net."}},"CurrentTailnet":{{"MagicDNSEnabled":true}},"CertDomains":["studio.tail1234.ts.net"]}}"#
+    );
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncase \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  *) exit 1;;\nesac\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// 在沒有終端機(stdin 是 /dev/null)的情況下跑安裝,PATH 最前面是假 tailscale。
+#[cfg(unix)]
+fn run_install_with_fake_tailscale(home: &TempDirectory, state: &str, arguments: &[&str]) -> Output {
+    let holder = TempDirectory::new("binary-fake-tailscale-holder");
+    let bin = fake_tailscale(&holder, state);
+    // 假 tailscale 放在家目錄之外,家目錄才能驗證完全沒被動過。
+    let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
+    Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(arguments)
+        .env("HOME", &home.0)
+        .env("USERPROFILE", &home.0)
+        .env("PATH", path)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("CI")
+        .env_remove("PURRDR_YES")
+        .env_remove("PURRDR_HOST_SERVICE_INSTALL_COMMAND")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn install_without_a_terminal_and_without_yes_stops_unchanged_and_gives_the_rerun_with_yes() {
+    let home = TempDirectory::new("binary-consent");
+
+    let output = run_install_with_fake_tailscale(&home, "Running", &["install", "--port", "47999"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(stderr.contains("studio.tail1234.ts.net"), "{stderr}");
+    assert!(stderr.contains("install --port 47999 --yes"), "{stderr}");
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0, "家目錄不該被改動");
+}
+
+#[cfg(unix)]
+#[test]
+fn json_does_not_count_as_consent_and_prints_one_json_object_on_stdout() {
+    let home = TempDirectory::new("binary-json-consent");
+
+    let output = run_install_with_fake_tailscale(&home, "Running", &["install", "--json", "--port", "47999"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["kind"], "consent_required");
+    let rerun = json["rerun_command"].as_str().unwrap();
+    assert!(rerun.contains("--json") && rerun.contains("--yes") && rerun.contains("--port 47999"), "{rerun}");
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn json_failure_prints_the_error_and_the_rerun_command_as_json() {
+    let home = TempDirectory::new("binary-json-failure");
+
+    let output = run_install_with_fake_tailscale(&home, "NeedsLogin", &["install", "--json", "--yes"]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
+    assert_eq!(json["ok"], false);
+    assert_eq!(json["error"]["kind"], "tailscale_not_running");
+    assert!(json["rerun_command"].as_str().unwrap().contains("install --yes --json"), "{json}");
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
+}
