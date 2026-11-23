@@ -73,3 +73,38 @@ fn version_flag_prints_version_without_touching_home() {
     }
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
+
+/// `--help` 列出所有安裝參數、對應的環境變數與說明網址(raychiutw/purrdr.host#85)。
+#[test]
+fn help_lists_every_install_option_environment_variable_and_the_help_links() {
+    let home = TempDirectory::new("binary-help");
+
+    for flag in ["--help", "help"] {
+        let output = run(&home, &[flag]);
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{output:?}");
+        for expected in [
+            "--port",
+            "--https-port",
+            "--session",
+            "--yes",
+            "--auto-update",
+            "--no-auto-update",
+            "--path",
+            "--no-path",
+            "--json",
+            "PURRDR_PORT",
+            "PURRDR_HTTPS_PORT",
+            "PURRDR_SESSION",
+            "PURRDR_AUTO_UPDATE",
+            "PURRDR_ADD_TO_PATH",
+            "PURRDR_YES",
+            "https://raychiutw.github.io/purrdr/host-service/#install-options",
+            "https://raychiutw.github.io/purrdr/host-service/llms.txt",
+        ] {
+            assert!(stdout.contains(expected), "{flag} 缺少 {expected}:\n{stdout}");
+        }
+    }
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
+}
