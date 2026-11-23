@@ -35,7 +35,7 @@ Install options (each can also be set with an environment variable; an option wi
   --auto-update, --no-auto-update   automatic updates     PURRDR_AUTO_UPDATE=1|0
   --path, --no-path         add bin/ to your PATH         PURRDR_ADD_TO_PATH=1|0
   --yes                     do not ask for confirmation   PURRDR_YES=1
-  --json                    print the result as JSON (implies --yes)
+  --json                    print one JSON object, never ask (still needs --yes to agree)
 Order of precedence: option > environment variable > previous install > default.
 
 All install options: https://raychiutw.github.io/purrdr/host-service/#install-options

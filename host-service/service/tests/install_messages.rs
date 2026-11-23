@@ -94,6 +94,7 @@ fn rerun_command_repeats_every_given_option_including_the_https_port() {
         herdr_session: Some("work".into()),
         https_port: Some(8443),
         assume_yes: true,
+        json: false,
         auto_update: Some(false),
         add_to_path: Some(false),
     };
@@ -113,6 +114,7 @@ fn rerun_command_repeats_the_switches_that_turn_settings_on() {
         herdr_session: None,
         https_port: None,
         assume_yes: false,
+        json: false,
         auto_update: Some(true),
         add_to_path: Some(true),
     };
@@ -129,6 +131,7 @@ fn rerun_command_quotes_a_session_name_for_the_shell_that_runs_it() {
         herdr_session: Some(session.into()),
         https_port: None,
         assume_yes: false,
+        json: false,
         auto_update: None,
         add_to_path: None,
     };
@@ -149,6 +152,7 @@ fn taken_https_port_suggests_the_other_port_without_repeating_the_taken_one() {
         herdr_session: None,
         https_port: Some(8443),
         assume_yes: true,
+        json: false,
         auto_update: None,
         add_to_path: None,
     };
@@ -208,4 +212,33 @@ fn success_lists_how_to_change_settings_later_with_the_help_links() {
     );
     // 配對步驟仍在「Change later」之前。
     assert!(message.find("2. In Purrdr").unwrap() < message.find("Change later:").unwrap(), "{message}");
+}
+
+#[test]
+fn rerun_command_keeps_json_before_the_https_port() {
+    let command = InstallCommand::Install {
+        port: None,
+        herdr_session: None,
+        https_port: Some(8443),
+        assume_yes: true,
+        json: true,
+        auto_update: None,
+        add_to_path: None,
+    };
+
+    let rerun = rerun_install_command("purrdr install", &command, InstallPlatform::Linux);
+
+    assert_eq!(rerun, "purrdr install --yes --json --https-port 8443");
+}
+
+#[test]
+fn consent_required_says_nothing_changed_and_ends_with_the_rerun_that_agrees() {
+    let error = InstallError::ConsentRequired {
+        notice: "the hostname becomes public".into(),
+    };
+
+    let message = error.explain("purrdr install --yes");
+
+    assert_contains_all(&message, &["the hostname becomes public", "nothing was changed", "--yes"]);
+    assert!(message.trim_end().ends_with("purrdr install --yes"), "{message}");
 }

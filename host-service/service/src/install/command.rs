@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use super::interactive::{TerminalPrompter, install_interactively};
 use super::location::InstalledService;
+use super::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
 use super::settings::{RequestedSettings, assume_yes};
 use super::system::ProcessHostSystem;
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
@@ -35,16 +36,34 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
         .ok()
         .filter(|prefix| !prefix.trim().is_empty())
         .unwrap_or_else(|| format!("{} install", shell_quoted(&environment.current_executable, environment.platform)));
-    let rerun = rerun_install_command(&rerun_prefix, &command, environment.platform);
+    let platform = environment.platform;
+    let rerun = rerun_install_command(&rerun_prefix, &command, platform);
     let mut installer = Installer::new(environment, ProcessHostSystem);
     match command {
-        InstallCommand::Install { .. } => {
+        InstallCommand::Install { json, .. } => {
             let environment = |name: &str| std::env::var(name).ok();
+            // `--json` 時 stdout 只放最後那個 JSON 物件，人類看的訊息一律走 stderr。
+            let fail_install = |error: &InstallError, rerun: &str| {
+                if json {
+                    println!("{}", failure_json(error, rerun));
+                } else {
+                    eprintln!("{}", error.explain(rerun));
+                }
+                ExitCode::FAILURE
+            };
             let requested = match RequestedSettings::resolve(&command, environment) {
                 Ok(requested) => requested,
                 Err(error) => {
-                    eprintln!("{}", error.explain(&rerun));
-                    return ExitCode::FAILURE;
+                    return if json {
+                        println!(
+                            "{}",
+                            serde_json::json!({ "ok": false, "error": { "kind": "invalid_environment", "message": error.explain(&rerun) }, "rerun_command": rerun })
+                        );
+                        ExitCode::FAILURE
+                    } else {
+                        eprintln!("{}", error.explain(&rerun));
+                        ExitCode::FAILURE
+                    };
                 }
             };
             let assume_yes = match assume_yes(&command, environment) {
@@ -55,36 +74,42 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
                 }
             };
             let options = InstallOptions { requested, source_directory };
-            let confirm = |question: &InstallQuestion| {
-                println!("{question}");
-                let prompt = match question {
-                    InstallQuestion::UseAnotherHttpsPort { alternative, .. } => format!("Use HTTPS {alternative}? [y/N] "),
-                    InstallQuestion::CertificateTransparency { .. } => "Continue? [y/N] ".to_owned(),
-                };
-                if assume_yes {
-                    println!("{prompt}yes (--yes)");
-                    return true;
-                }
-                ask(&prompt)
-            };
-            // 有終端機且沒有 --yes:先摘要與選單;否則照設定直接安裝。
-            let interactive = !assume_yes && std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let interactive = asks_questions(assume_yes, json, environment, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
             let result = if interactive {
                 install_interactively(&mut installer, options, &mut TerminalPrompter)
             } else {
-                installer.install(&options, confirm)
+                // 不詢問:同意的問題照實印出(--json 時印到 stderr)。
+                let announce = |question: &InstallQuestion| {
+                    if json {
+                        eprintln!("{question}\nContinuing because of --yes.");
+                    } else {
+                        println!("{question}\nContinuing because of --yes.");
+                    }
+                };
+                install_without_prompting(&mut installer, &options, assume_yes, announce)
             };
             match result {
                 Ok(installed) => {
                     for warning in &installed.warnings {
                         eprintln!("warning: {warning}");
                     }
-                    println!("{installed}");
+                    if json {
+                        println!("{}", success_json(&installed));
+                    } else {
+                        if !interactive {
+                            println!("{}\n", installed.settings_summary());
+                        }
+                        println!("{installed}");
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(error) => {
-                    eprintln!("{}", error.explain(&rerun));
-                    ExitCode::FAILURE
+                    // 需要同意時，重跑指令要帶 --yes(--json 不算同意)。
+                    let rerun = match error {
+                        InstallError::ConsentRequired { .. } => rerun_install_command(&rerun_prefix, &command.agreeing(), platform),
+                        _ => rerun,
+                    };
+                    fail_install(&error, &rerun)
                 }
             }
         }

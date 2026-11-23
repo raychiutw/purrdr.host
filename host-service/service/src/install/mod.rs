@@ -13,6 +13,7 @@ mod command_alias;
 mod herdr_shortcut;
 pub mod interactive;
 mod location;
+pub mod non_interactive;
 pub mod settings;
 pub mod system;
 mod tailscale;
@@ -166,6 +167,8 @@ pub enum InstallCommand {
         /// `tailscale serve` 的 HTTPS 埠;沒指定時依環境變數、上次安裝，或 443。
         https_port: Option<u16>,
         assume_yes: bool,
+        /// `--json`:結果以單一 JSON 物件輸出到 stdout，隱含不詢問(但不算同意憑證公開)。
+        json: bool,
         /// `--auto-update`(`Some(true)`)／`--no-auto-update`(`Some(false)`)。
         auto_update: Option<bool>,
         /// `--path`(`Some(true)`)／`--no-path`(`Some(false)`)。
@@ -221,7 +224,7 @@ impl InstallCommand {
     }
 
     fn parse_install(options: &[String]) -> Result<Self, String> {
-        let (mut port, mut herdr_session, mut https_port, mut assume_yes) = (None, None, None, false);
+        let (mut port, mut herdr_session, mut https_port, mut assume_yes, mut json) = (None, None, None, false, false);
         let (mut auto_update, mut add_to_path): (Option<bool>, Option<bool>) = (None, None);
         // 成對開關互相矛盾時報錯，不靜默以後者為準。
         let pair = |slot: &mut Option<bool>, value: bool, on: &str, off: &str| match *slot {
@@ -250,6 +253,7 @@ impl InstallCommand {
                 }
                 "--session" => herdr_session = Some(value()?.clone()),
                 "--yes" => assume_yes = true,
+                "--json" => json = true,
                 "--auto-update" => pair(&mut auto_update, true, "--auto-update", "--no-auto-update")?,
                 "--no-auto-update" => pair(&mut auto_update, false, "--auto-update", "--no-auto-update")?,
                 "--path" => pair(&mut add_to_path, true, "--path", "--no-path")?,
@@ -262,9 +266,24 @@ impl InstallCommand {
             herdr_session,
             https_port,
             assume_yes,
+            json,
             auto_update,
             add_to_path,
         })
+    }
+
+    /// 同一個指令加上 `--yes`(同意憑證公開後重跑用)。
+    pub fn agreeing(&self) -> Self {
+        match self {
+            InstallCommand::Install { .. } => {
+                let mut command = self.clone();
+                if let InstallCommand::Install { assume_yes, .. } = &mut command {
+                    *assume_yes = true;
+                }
+                command
+            }
+            other => other.clone(),
+        }
     }
 }
 
@@ -372,6 +391,31 @@ pub struct Installed {
     pub command_alias: bool,
 }
 
+impl Installed {
+    /// 每一項最後採用的值與來源(沒辦法詢問時印出，讓使用者知道裝了什麼)。
+    pub fn settings_summary(&self) -> String {
+        let settings = &self.settings;
+        let yes_no = |value: bool| if value { "yes" } else { "no" };
+        [
+            "Settings:".to_owned(),
+            format!("  Local port: {} ({})", settings.port.value, settings.port.source),
+            format!("  HTTPS port: {} ({})", settings.https_port.value, settings.https_port.source),
+            format!(
+                "  herdr session: {} ({})",
+                settings.herdr_session.value.as_deref().unwrap_or("default"),
+                settings.herdr_session.source
+            ),
+            format!(
+                "  Auto update: {} ({})",
+                if settings.auto_update.value { "on" } else { "off" },
+                settings.auto_update.source
+            ),
+            format!("  Add to PATH: {} ({})", yes_no(settings.add_to_path.value), settings.add_to_path.source),
+        ]
+        .join("\n")
+    }
+}
+
 impl std::fmt::Display for Installed {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(formatter, "Installed. The host service starts at login.")?;
@@ -422,6 +466,7 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         herdr_session,
         https_port,
         assume_yes,
+        json,
         auto_update,
         add_to_path,
     } = command
@@ -447,6 +492,9 @@ pub fn rerun_install_command(prefix: &str, command: &InstallCommand, platform: I
         Some(true) => parts.push("--path".to_owned()),
         Some(false) => parts.push("--no-path".to_owned()),
         None => {}
+    }
+    if *json {
+        parts.push("--json".to_owned());
     }
     if let Some(https_port) = https_port {
         parts.push(format!("{HTTPS_PORT_OPTION} {https_port}"));
@@ -485,6 +533,10 @@ pub enum InstallError {
     },
     /// 使用者看過 Certificate Transparency 的說明後取消。
     Declined,
+    /// 沒辦法詢問、也沒有 `--yes`:需要同意(`notice` 是要同意的說明)，什麼都沒改。
+    ConsentRequired {
+        notice: String,
+    },
     /// 這個 HTTPS 埠已經轉到別的服務;`available` 是可以改用的埠。
     ServePortTaken {
         https_port: u16,
@@ -537,6 +589,10 @@ impl InstallError {
                  Next: fix the problem above, {then_rerun}"
             ),
             InstallError::Declined => "Install cancelled; nothing was changed.".to_owned(),
+            InstallError::ConsentRequired { notice } => format!(
+                "{notice}\n\nThis install needs your consent and cannot ask (no terminal, CI, or --json), so nothing was changed.\n\
+                 Next: to agree, run the install again with --yes:\n  {rerun}"
+            ),
             InstallError::ServePortTaken {
                 https_port,
                 handlers,
@@ -570,6 +626,25 @@ impl InstallError {
             ),
             InstallError::Io(message) => format!("{message}\nNext: fix the problem above, {then_rerun}"),
             InstallError::NotInstalled => "The Purrdr host service is not installed.".to_owned(),
+        }
+    }
+
+    /// 機器可讀的錯誤種類(`--json` 的 `error.kind`)。
+    pub fn kind(&self) -> &'static str {
+        match self {
+            InstallError::TailscaleMissing => "tailscale_missing",
+            InstallError::TailscaleNotRunning(_) => "tailscale_not_running",
+            InstallError::MagicDnsDisabled => "magic_dns_disabled",
+            InstallError::HttpsCertificatesDisabled => "https_certificates_disabled",
+            InstallError::ServeFailed { .. } => "serve_failed",
+            InstallError::Declined => "declined",
+            InstallError::ConsentRequired { .. } => "consent_required",
+            InstallError::ServePortTaken { .. } => "https_port_taken",
+            InstallError::ServeChanged { .. } => "serve_changed",
+            InstallError::Tailscale(_) => "tailscale_error",
+            InstallError::Autostart(_) => "autostart_failed",
+            InstallError::NotInstalled => "not_installed",
+            InstallError::Io(_) => "io_error",
         }
     }
 
