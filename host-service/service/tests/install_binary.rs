@@ -138,7 +138,10 @@ impl FakeCommands {
         );
         write(
             "tailscale",
-            &format!("echo \"tailscale $*\" >> '{}'\ncase \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac", log.display()),
+            &format!(
+                "echo \"tailscale $*\" >> '{}'\ncase \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac",
+                log.display()
+            ),
         );
         write("id", "echo 501");
         for name in [

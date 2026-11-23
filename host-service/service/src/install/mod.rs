@@ -22,6 +22,7 @@ mod user_path;
 pub use command::{report_invalid_arguments, run_command};
 pub use command_alias::CommandAlias;
 pub use location::{HelperLauncher, InstalledService};
+use settings::yes_no;
 use system::HostSystem;
 use tailscale::Tailscale;
 
@@ -89,11 +90,10 @@ pub struct HostStatus {
 
 impl std::fmt::Display for HostStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let yes_no = |value: bool| if value { "yes" } else { "no" };
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
         if let Some(auto_update) = self.auto_update {
-            writeln!(formatter, "  auto update: {}", if auto_update { "on" } else { "off" })?;
+            writeln!(formatter, "  auto update: {}", settings::on_off(auto_update))?;
         }
         writeln!(formatter, "  logs: {}", self.log_directory.display())?;
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
@@ -274,16 +274,11 @@ impl InstallCommand {
 
     /// 同一個指令加上 `--yes`(同意憑證公開後重跑用)。
     pub fn agreeing(&self) -> Self {
-        match self {
-            InstallCommand::Install { .. } => {
-                let mut command = self.clone();
-                if let InstallCommand::Install { assume_yes, .. } = &mut command {
-                    *assume_yes = true;
-                }
-                command
-            }
-            other => other.clone(),
+        let mut command = self.clone();
+        if let InstallCommand::Install { assume_yes, .. } = &mut command {
+            *assume_yes = true;
         }
+        command
     }
 }
 
@@ -301,6 +296,15 @@ pub struct InstallOptions {
 pub struct SkippedHttpsPort {
     pub port: u16,
     pub handlers: String,
+}
+
+/// 被跳過的候選埠與占用者,例如 `443 is used by / -> http://127.0.0.1:8765; 8443 is used by …`。
+pub fn describe_skipped(skipped: &[SkippedHttpsPort]) -> String {
+    skipped
+        .iter()
+        .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// HTTPS 埠的建議值：`port` 是第一個可用的候選埠(沒有時 `None`),`skipped` 是它前面被別人占用的候選埠。

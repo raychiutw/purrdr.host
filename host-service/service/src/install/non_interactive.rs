@@ -7,7 +7,7 @@ use serde_json::{Value, json};
 
 use super::settings::{InstallSettings, Sourced};
 use super::system::HostSystem;
-use super::{InstallError, InstallOptions, InstallQuestion, Installed, Installer};
+use super::{InstallError, InstallOptions, InstallQuestion, Installed, Installer, describe_skipped};
 
 /// 要不要用終端機詢問使用者。`assume_yes` 已含 `PURRDR_YES=1`;`--json` 隱含不詢問。
 pub fn asks_questions(assume_yes: bool, json: bool, environment: impl Fn(&str) -> Option<String>, stdin_terminal: bool, stdout_terminal: bool) -> bool {
@@ -30,12 +30,7 @@ pub fn install_without_prompting<S: HostSystem>(
         // 預設的 HTTPS 埠被占用:不詢問，直接用建議值(只有使用者明確指定的埠被占用才報錯，那在 `install` 裡處理);
         // 原因記進警告。
         InstallQuestion::UseAnotherHttpsPort { alternative, skipped, .. } => {
-            let reasons = skipped
-                .iter()
-                .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
-                .collect::<Vec<_>>()
-                .join("; ");
-            port_changes.push(format!("HTTPS {reasons}; using HTTPS {alternative} instead"));
+            port_changes.push(format!("HTTPS {}; using HTTPS {alternative} instead", describe_skipped(skipped)));
             true
         }
         InstallQuestion::CertificateTransparency { .. } if assume_yes => {

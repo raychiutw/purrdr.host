@@ -150,7 +150,10 @@ fn taken_default_https_port_switches_to_the_suggestion_without_asking_and_says_w
     assert_eq!(installed.https_address, format!("https://{FQDN}:8443"));
     assert_eq!(installed.settings.https_port.value, 8443);
     assert_eq!(installed.settings.https_port.source, Source::Suggested, "自動換埠不是預設值");
-    assert_eq!(success_json(&installed)["settings"]["https_port"], serde_json::json!({ "value": 8443, "source": "suggested" }));
+    assert_eq!(
+        success_json(&installed)["settings"]["https_port"],
+        serde_json::json!({ "value": 8443, "source": "suggested" })
+    );
     let warning = installed.warnings.join("\n");
     assert!(warning.contains("443 is used by / -> http://127.0.0.1:8765"), "{warning}");
     assert!(warning.contains("8443"), "{warning}");
@@ -198,7 +201,10 @@ fn a_failed_install_still_knows_the_settings_it_resolved() {
     assert_eq!((settings.port.value, settings.port.source), (47_820, Source::Argument));
     assert_eq!((settings.https_port.value, settings.https_port.source), (443, Source::Default));
     let summary = settings.summary();
-    assert!(summary.contains("Local port: 47820 (argument)") && summary.contains("HTTPS port: 443 (default)"), "{summary}");
+    assert!(
+        summary.contains("Local port: 47820 (argument)") && summary.contains("HTTPS port: 443 (default)"),
+        "{summary}"
+    );
 }
 
 #[test]

@@ -42,6 +42,21 @@ impl std::fmt::Display for Source {
     }
 }
 
+/// 摘要裡的「yes／no」。
+pub fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// 摘要裡的「on／off」。
+pub fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+/// 沒指定 herdr session 時顯示 `default`。
+pub fn session_name(session: &Option<String>) -> &str {
+    session.as_deref().unwrap_or("default")
+}
+
 /// 一個帶來源的設定值。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sourced<T> {
@@ -83,9 +98,9 @@ impl InstallSettings {
             "Settings:".to_owned(),
             format!("  Local port: {} ({})", self.port.value, self.port.source),
             format!("  HTTPS port: {} ({})", self.https_port.value, self.https_port.source),
-            format!("  herdr session: {} ({})", self.herdr_session.value.as_deref().unwrap_or("default"), self.herdr_session.source),
-            format!("  Auto update: {} ({})", if self.auto_update.value { "on" } else { "off" }, self.auto_update.source),
-            format!("  Add to PATH: {} ({})", if self.add_to_path.value { "yes" } else { "no" }, self.add_to_path.source),
+            format!("  herdr session: {} ({})", session_name(&self.herdr_session.value), self.herdr_session.source),
+            format!("  Auto update: {} ({})", on_off(self.auto_update.value), self.auto_update.source),
+            format!("  Add to PATH: {} ({})", yes_no(self.add_to_path.value), self.add_to_path.source),
         ]
         .join("\n")
     }
