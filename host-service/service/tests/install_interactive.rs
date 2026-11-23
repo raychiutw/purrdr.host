@@ -63,6 +63,18 @@ fn summary_says_why_the_default_https_port_was_skipped_and_which_one_is_used() {
 }
 
 #[test]
+fn a_suggested_https_port_is_labelled_suggested_in_the_plan_and_the_result() {
+    let (host, mut installer) = host_with(InstallPlatform::MacOs);
+    occupy_https_port(installer.system_mut(), 443, "http://127.0.0.1:8765");
+
+    let plan = installer.plan(&defaults(&host)).unwrap();
+    let installed = install_interactively(&mut installer, defaults(&host), &mut ScriptedPrompter::new(&[""])).unwrap();
+
+    assert_eq!((plan.settings.https_port.value, plan.settings.https_port.source), (8443, Source::Suggested));
+    assert_eq!(installed.settings.https_port.source, Source::Suggested);
+}
+
+#[test]
 fn cancel_changes_nothing() {
     let (host, mut installer) = host_with(InstallPlatform::Linux);
     let system_before = installer.system().state.clone();

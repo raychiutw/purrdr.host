@@ -149,6 +149,8 @@ fn taken_default_https_port_switches_to_the_suggestion_without_asking_and_says_w
 
     assert_eq!(installed.https_address, format!("https://{FQDN}:8443"));
     assert_eq!(installed.settings.https_port.value, 8443);
+    assert_eq!(installed.settings.https_port.source, Source::Suggested, "自動換埠不是預設值");
+    assert_eq!(success_json(&installed)["settings"]["https_port"], serde_json::json!({ "value": 8443, "source": "suggested" }));
     let warning = installed.warnings.join("\n");
     assert!(warning.contains("443 is used by / -> http://127.0.0.1:8765"), "{warning}");
     assert!(warning.contains("8443"), "{warning}");

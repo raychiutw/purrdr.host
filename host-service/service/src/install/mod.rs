@@ -858,7 +858,7 @@ impl<S: HostSystem> Installer<S> {
                 }
                 settings.https_port = settings::Sourced {
                     value: alternative,
-                    source: settings::Source::Default,
+                    source: settings::Source::Suggested,
                 };
                 self.attempted = Some(settings.clone());
                 (alternative, false)
@@ -956,7 +956,7 @@ impl<S: HostSystem> Installer<S> {
             if let Some(alternative) = alternative {
                 settings.https_port = settings::Sourced {
                     value: alternative,
-                    source: settings::Source::Default,
+                    source: settings::Source::Suggested,
                 };
             }
             https_port_conflict = Some(HttpsPortConflict {
