@@ -18,6 +18,21 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo run -p protocol-codegen        # 改了 protocol/host-service.schema.json 後重新產生型別
 ```
 
+## 在真主機上跑暫時的主機服務
+
+實機測試時以 ssh 前景跑一份暫時的主機服務(raychiutw/purrdr.host#88):
+
+- 用**複製出來**的執行檔、獨立的 `--state-dir`(放暫存資料夾，名稱帶可辨識標記)與另一個埠，並覆寫 `HOME`／`USERPROFILE` 指到暫存資料夾。不要直接執行 `~/.purrdr/host-service/bin/` 那份：它會被當成安裝好的主機服務而啟動自動更新，可能停掉正式服務;不覆寫家目錄則會動到共用的 `~/.purrdr/push-sender`。
+- **Windows:殺掉本機 ssh 不會結束遠端程序。** Win32-OpenSSH 在沒有 pty 的 session 異常結束時不結束子程序樹，主機服務也收不到 stdin EOF,會一直佔著埠。測試結束一定要明確清理：以 `<state-dir>/running.json` 的 `pid` 結束，再掃一次指令列含標記的程序(含 Git Bash 的 `bash.exe` 外殼):
+
+  ```powershell
+  Stop-Process -Id (Get-Content "$env:TEMP\purrdr-test-<標記>\state\running.json" | ConvertFrom-Json).pid -Force
+  Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*purrdr-test-<標記>*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+  ```
+
+- `ssh -tt`(配置 pty)時關閉連線會連帶結束遠端程序，但 DefaultShell 是 Git Bash 時遠端指令的參數會被吃掉，不當成標準做法。
+- 只結束自己啟動、指令列含自己標記的程序;不碰正式服務(預設埠 47820、`~/.purrdr/host-service/`)。
+
 ## 發行
 
 - 升 `host-service/service/Cargo.toml` 的 version(`Cargo.lock` 用 `cargo update -p purrdr-host-service --offline` 同步),並在 `host-service/CHANGELOG.md` 最上面加 `## <版本>` 一段給一般使用者看的更新說明(CI 會檢查)。

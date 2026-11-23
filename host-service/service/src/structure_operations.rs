@@ -151,6 +151,10 @@ pub async fn agent_start(herdr: &HerdrClient, request: AgentStart, transcripts: 
     }
     let mut params = json!({"name": request.name, "kind": request.kind, "pane_id": request.pane_id});
     let mut args = Vec::new();
+    // Codex 固定帶 --no-daemon(herdr 官方建議);續接時順序是 `codex --no-daemon resume <id>`。
+    if request.kind == "codex" {
+        args.push(json!("--no-daemon"));
+    }
     if let Some(permission_mode) = request.permission_mode {
         args.extend([json!("--permission-mode"), json!(permission_mode)]);
     }
