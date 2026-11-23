@@ -138,7 +138,7 @@ impl FakeCommands {
         );
         write(
             "tailscale",
-            &format!("case \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  *) exit 1;;\nesac"),
+            &format!("case \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac"),
         );
         write("id", "echo 501");
         for name in [
@@ -252,4 +252,20 @@ fn rollback_after_a_failed_install_only_reaches_the_fake_system_commands() {
         calls.contains("launchctl bootout") || calls.contains("systemctl --user disable"),
         "回復應呼叫到假的 launchctl／systemctl(代表 PATH 已隔離):{calls:?}"
     );
+}
+
+/// `tailscale serve --bg` 會把「Available within your tailnet…」印到自己的 stdout(經 `run_attached` 繼承);
+/// `--json` 時 stdout 仍必須只有單一 JSON 物件，子行程的輸出改走 stderr。
+#[cfg(unix)]
+#[test]
+fn json_keeps_stdout_a_single_object_even_when_tailscale_serve_prints_text() {
+    let home = TempDirectory::new("binary-json-attached");
+    let commands = FakeCommands::new("Running");
+
+    let output = run_install_with_fake_tailscale(&home, &commands, &["install", "--yes", "--json", "--no-path"]);
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
+    assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Available within your tailnet"), "子行程的輸出應改走 stderr:{stderr}");
 }
