@@ -196,7 +196,7 @@ async fn resuming_claude_passes_resume_after_the_permission_mode() {
 }
 
 #[tokio::test]
-async fn resuming_codex_uses_the_resume_subcommand() {
+async fn resuming_codex_puts_no_daemon_before_the_resume_subcommand() {
     let home = TempDir::new().unwrap();
     let rollout = home
         .path()
@@ -219,7 +219,7 @@ async fn resuming_codex_uses_the_resume_subcommand() {
         .await;
 
     assert_eq!(reply["type"], "agent.start.result", "{reply}");
-    assert_eq!(forwarded_start(&herdr)["args"], json!(["resume", OLDER]));
+    assert_eq!(forwarded_start(&herdr)["args"], json!(["--no-daemon", "resume", OLDER]));
 }
 
 #[tokio::test]
