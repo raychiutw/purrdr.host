@@ -240,7 +240,7 @@ impl InstallCommand {
             match option.as_str() {
                 "--port" => {
                     let text = value()?;
-                    port = Some(text.parse().map_err(|_| format!("invalid port: {text}"))?);
+                    port = Some(text.parse().ok().filter(|port| *port != 0).ok_or_else(|| format!("invalid port: {text}"))?);
                 }
                 "--https-port" => {
                     let text = value()?;

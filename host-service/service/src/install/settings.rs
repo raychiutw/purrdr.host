@@ -171,11 +171,11 @@ impl RequestedSettings {
                 }),
             }
         }
-        let port_number = |text: &str| text.parse::<u16>().ok();
-        let https_port_number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
+        // 0 不是可用的埠(本機埠與 HTTPS 埠一樣)。
+        let port_number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
         Ok(RequestedSettings {
-            port: decide(port, "PURRDR_PORT", "a port number (0-65535)", &environment, port_number)?,
-            https_port: decide(https_port, "PURRDR_HTTPS_PORT", "a port number (1-65535)", &environment, https_port_number)?,
+            port: decide(port, "PURRDR_PORT", "a port number (1-65535)", &environment, port_number)?,
+            https_port: decide(https_port, "PURRDR_HTTPS_PORT", "a port number (1-65535)", &environment, port_number)?,
             herdr_session: decide(herdr_session, "PURRDR_SESSION", "a herdr session name", &environment, |text| {
                 Some(text.to_owned())
             })?,

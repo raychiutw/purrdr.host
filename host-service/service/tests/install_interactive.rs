@@ -132,12 +132,13 @@ fn customizing_asks_each_setting_with_its_default_and_blank_keeps_the_default() 
 fn customizing_rejects_bad_ports_and_taken_https_ports_and_asks_again() {
     let (host, mut installer) = host_with(InstallPlatform::Windows);
     occupy_https_port(installer.system_mut(), 8443, "http://127.0.0.1:3000");
-    let mut prompter = ScriptedPrompter::new(&["2", "abc", "70000", "47821", "0", "8443", "10000", "", "", "", ""]);
+    let mut prompter = ScriptedPrompter::new(&["2", "abc", "70000", "0", "47821", "0", "8443", "10000", "", "", "", ""]);
 
     let installed = install_interactively(&mut installer, defaults(&host), &mut prompter).unwrap();
 
     let screen = &prompter.transcript;
     assert!(screen.contains("not a port number"), "{screen}");
+    assert!(!screen.contains("0-65535"), "本機埠也不接受 0:{screen}");
     assert!(screen.contains("8443 is used by / -> http://127.0.0.1:3000"), "{screen}");
     assert_eq!(installed.settings.port.value, 47_821);
     assert_eq!(installed.settings.https_port.value, 10_000);

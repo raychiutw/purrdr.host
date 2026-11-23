@@ -66,6 +66,7 @@ fn empty_environment_variables_count_as_unset() {
 fn invalid_environment_values_name_the_variable_and_give_the_rerun_command() {
     for (name, value) in [
         ("PURRDR_PORT", "abc"),
+        ("PURRDR_PORT", "0"),
         ("PURRDR_HTTPS_PORT", "0"),
         ("PURRDR_AUTO_UPDATE", "yes"),
         ("PURRDR_ADD_TO_PATH", "2"),

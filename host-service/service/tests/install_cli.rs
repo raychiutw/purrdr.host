@@ -125,6 +125,7 @@ fn other_arguments_are_left_to_the_service_or_rejected() {
         "install --bind 0.0.0.0",
         "install --port",
         "install --port x",
+        "install --port 0",
         "install --https-port",
         "install --https-port 0",
         "install --https-port https",

@@ -134,7 +134,10 @@ fn customize<S: HostSystem>(installer: &mut Installer<S>, options: &mut InstallO
     let current = &plan.settings;
     prompter.say("Press Enter to keep the value in brackets.");
     let port = prompter.ask_validated("Local port", &current.port.value.to_string(), |text| {
-        text.parse::<u16>().map_err(|_| "That is not a port number (0-65535).".to_owned())
+        text.parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "That is not a port number (1-65535).".to_owned())
     })?;
     let https_port = prompter.ask_validated("HTTPS port", &current.https_port.value.to_string(), |text| {
         let https_port = text
