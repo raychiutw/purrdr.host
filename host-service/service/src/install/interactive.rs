@@ -2,9 +2,9 @@
 
 use std::io::{BufRead, Write};
 
-use super::settings::{Source, Sourced};
+use super::settings::{Source, Sourced, on_off, session_name, yes_no};
 use super::system::HostSystem;
-use super::{InstallError, InstallOptions, InstallPlan, InstallQuestion, Installed, Installer, certificate_transparency_notice};
+use super::{InstallError, InstallOptions, InstallPlan, InstallQuestion, Installed, Installer, certificate_transparency_notice, describe_skipped};
 
 /// 安裝程式的詢問介面。實作只需提供「顯示一段文字」與「顯示提示並讀一行」;
 /// 選單、帶預設值的文字／數值與是／否都由預設方法完成，輸入不合法時重問。
@@ -134,7 +134,10 @@ fn customize<S: HostSystem>(installer: &mut Installer<S>, options: &mut InstallO
     let current = &plan.settings;
     prompter.say("Press Enter to keep the value in brackets.");
     let port = prompter.ask_validated("Local port", &current.port.value.to_string(), |text| {
-        text.parse::<u16>().map_err(|_| "That is not a port number (0-65535).".to_owned())
+        text.parse::<u16>()
+            .ok()
+            .filter(|port| *port != 0)
+            .ok_or_else(|| "That is not a port number (1-65535).".to_owned())
     })?;
     let https_port = prompter.ask_validated("HTTPS port", &current.https_port.value.to_string(), |text| {
         let https_port = text
@@ -148,7 +151,7 @@ fn customize<S: HostSystem>(installer: &mut Installer<S>, options: &mut InstallO
             Err(error) => Err(error.to_string()),
         }
     })?;
-    let session_default = current.herdr_session.value.as_deref().unwrap_or("default");
+    let session_default = session_name(&current.herdr_session.value);
     let session = prompter.ask_validated("herdr session", session_default, |text| Ok(text.to_owned()))?;
     let auto_update = prompter.ask_yes_no("Auto update", current.auto_update.value)?;
     let add_to_path = prompter.ask_yes_no("Add to PATH", current.add_to_path.value)?;
@@ -175,7 +178,6 @@ fn customize<S: HostSystem>(installer: &mut Installer<S>, options: &mut InstallO
 /// 安裝前摘要：本機埠、HTTPS 埠與被占用的原因、HTTPS 網址、herdr session、自動更新、加入 PATH，需要時加上憑證公開提醒。
 pub fn summary(plan: &InstallPlan) -> String {
     let settings = &plan.settings;
-    let yes_no = |value: bool| if value { "yes" } else { "no" };
     let mut lines = vec![
         if plan.reinstall {
             "Purrdr host service is already installed. Settings:"
@@ -187,12 +189,7 @@ pub fn summary(plan: &InstallPlan) -> String {
         format!("  HTTPS port: {}", settings.https_port.value),
     ];
     if let Some(conflict) = &plan.https_port_conflict {
-        let reasons = conflict
-            .skipped
-            .iter()
-            .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
-            .collect::<Vec<_>>()
-            .join("; ");
+        let reasons = describe_skipped(&conflict.skipped);
         let outcome = if conflict.port == settings.https_port.value {
             "choose another port with Customize"
         } else {
@@ -201,8 +198,8 @@ pub fn summary(plan: &InstallPlan) -> String {
         lines.push(format!("    ({reasons}; {outcome})"));
     }
     lines.push(format!("  HTTPS address: {}", plan.https_address));
-    lines.push(format!("  herdr session: {}", settings.herdr_session.value.as_deref().unwrap_or("default")));
-    lines.push(format!("  Auto update: {}", if settings.auto_update.value { "on" } else { "off" }));
+    lines.push(format!("  herdr session: {}", session_name(&settings.herdr_session.value)));
+    lines.push(format!("  Auto update: {}", on_off(settings.auto_update.value)));
     lines.push(format!("  Add to PATH: {}", yes_no(settings.add_to_path.value)));
     if plan.certificate_notice {
         lines.push(String::new());

@@ -61,10 +61,7 @@ async fn main() -> ExitCode {
     if let Some(command) = InstallCommand::parse(&arguments) {
         return match command {
             Ok(command) => install::run_command(command).await,
-            Err(message) => {
-                eprintln!("{message}");
-                ExitCode::from(2)
-            }
+            Err(message) => install::report_invalid_arguments(&arguments, &message),
         };
     }
     match arguments.first().map(String::as_str) {

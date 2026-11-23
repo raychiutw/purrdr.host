@@ -138,7 +138,10 @@ impl FakeCommands {
         );
         write(
             "tailscale",
-            &format!("case \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  *) exit 1;;\nesac"),
+            &format!(
+                "echo \"tailscale $*\" >> '{}'\ncase \"$1 $2\" in\n  'version ') echo 1.0;;\n  'status --json') echo '{status}';;\n  'serve status') echo '{{}}';;\n  'serve --bg') echo 'Available within your tailnet: https://studio.tail1234.ts.net'; exit 1;;\n  *) exit 1;;\nesac",
+                log.display()
+            ),
         );
         write("id", "echo 501");
         for name in [
@@ -160,6 +163,16 @@ impl FakeCommands {
         }
     }
 
+    /// 走到 `tailscale serve` 的測試用:紀錄裡有假 tailscale 的呼叫，代表用到的是 PATH 上的假指令，
+    /// 沒有退回 macOS 的 `/Applications/Tailscale.app/...` 之類真的 Tailscale。
+    fn assert_used_the_fake_tailscale(&self) {
+        let calls = self.calls();
+        assert!(
+            calls.contains("tailscale version") && calls.contains("tailscale serve --bg"),
+            "應該只用到假的 tailscale:{calls:?}"
+        );
+    }
+
     /// 假指令被呼叫的紀錄(沒有呼叫時是空字串)。
     fn calls(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
@@ -169,18 +182,27 @@ impl FakeCommands {
 /// 在沒有終端機(stdin 是 /dev/null)的情況下跑安裝;PATH 只有假指令。
 #[cfg(unix)]
 fn run_install_with_fake_tailscale(home: &TempDirectory, commands: &FakeCommands, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+    run_install_with_environment(home, commands, arguments, &[])
+}
+
+/// 同上，另外設定 `environment` 裡的環境變數。
+/// 環境變數先全清，只放最小的 allow-list(PATH 是假指令資料夾、HOME／USERPROFILE 是暫存家目錄、TMPDIR),
+/// 開發者環境裡的 `PURRDR_*`、`HERDR_SESSION`、`CI` 等都不會影響結果。
+#[cfg(unix)]
+fn run_install_with_environment(home: &TempDirectory, commands: &FakeCommands, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"));
+    command
         .args(arguments)
+        .env_clear()
         .env("HOME", &home.0)
         .env("USERPROFILE", &home.0)
         .env("PATH", &commands.bin)
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("CI")
-        .env_remove("PURRDR_YES")
-        .env_remove("PURRDR_HOST_SERVICE_INSTALL_COMMAND")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .unwrap()
+        .envs(environment.iter().copied())
+        .stdin(std::process::Stdio::null());
+    if let Some(temporary) = std::env::var_os("TMPDIR") {
+        command.env("TMPDIR", temporary);
+    }
+    command.output().unwrap()
 }
 
 #[cfg(unix)]
@@ -196,6 +218,7 @@ fn install_without_a_terminal_and_without_yes_stops_unchanged_and_gives_the_reru
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(stderr.contains("studio.tail1234.ts.net"), "{stderr}");
     assert!(stderr.contains("install --port 47999 --yes"), "{stderr}");
+    assert!(stderr.contains("Local port: 47999 (argument)"), "中途停止也要印出各項設定與來源:{stderr}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0, "家目錄不該被改動");
 }
 
@@ -214,6 +237,8 @@ fn json_does_not_count_as_consent_and_prints_one_json_object_on_stdout() {
     assert_eq!(json["error"]["kind"], "consent_required");
     let rerun = json["rerun_command"].as_str().unwrap();
     assert!(rerun.contains("--json") && rerun.contains("--yes") && rerun.contains("--port 47999"), "{rerun}");
+    assert_eq!(json["settings"]["port"], serde_json::json!({ "value": 47999, "source": "argument" }), "{json}");
+    assert_eq!(json["settings"]["https_port"]["source"], "default", "{json}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
 
@@ -230,6 +255,7 @@ fn json_failure_prints_the_error_and_the_rerun_command_as_json() {
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["kind"], "tailscale_not_running");
+    assert_eq!(json["settings"]["port"], serde_json::json!({ "value": 47820, "source": "default" }), "{json}");
     assert!(json["rerun_command"].as_str().unwrap().contains("install --yes --json"), "{json}");
     assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
 }
@@ -247,9 +273,112 @@ fn rollback_after_a_failed_install_only_reaches_the_fake_system_commands() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
+    commands.assert_used_the_fake_tailscale();
+    // 各平台只接受自己的回復指令:macOS 是 launchctl bootout,Linux 是 systemctl。
     let calls = commands.calls();
-    assert!(
-        calls.contains("launchctl bootout") || calls.contains("systemctl --user disable"),
-        "回復應呼叫到假的 launchctl／systemctl(代表 PATH 已隔離):{calls:?}"
-    );
+    let (expected, other) = if cfg!(target_os = "macos") {
+        ("launchctl bootout", "systemctl")
+    } else {
+        ("systemctl --user disable", "launchctl")
+    };
+    assert!(calls.contains(expected), "回復應呼叫到假的 {expected}(代表 PATH 已隔離):{calls:?}");
+    assert!(!calls.contains(other), "不該呼叫到 {other}:{calls:?}");
+}
+
+/// `tailscale serve --bg` 會把「Available within your tailnet…」印到自己的 stdout(經 `run_attached` 繼承);
+/// `--json` 時 stdout 仍必須只有單一 JSON 物件，子行程的輸出改走 stderr。
+#[cfg(unix)]
+#[test]
+fn json_keeps_stdout_a_single_object_even_when_tailscale_serve_prints_text() {
+    let home = TempDirectory::new("binary-json-attached");
+    let commands = FakeCommands::new("Running");
+
+    let output = run_install_with_fake_tailscale(&home, &commands, &["install", "--yes", "--json", "--no-path"]);
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"));
+    assert_eq!(json["error"]["kind"], "serve_failed", "{json}");
+    commands.assert_used_the_fake_tailscale();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("Available within your tailnet"), "子行程的輸出應改走 stderr:{stderr}");
+}
+
+/// 讀 stdout 的單一 JSON 物件;不是 JSON 就讓測試失敗。
+#[cfg(unix)]
+fn stdout_json(output: &Output) -> serde_json::Value {
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|error| panic!("stdout 不是單一 JSON:{error}\n{output:?}"))
+}
+
+/// `--json` 時連參數解析失敗也輸出 JSON(kind `invalid_arguments`),結束碼維持用法錯誤的 2。
+#[cfg(unix)]
+#[test]
+fn json_reports_argument_errors_as_json() {
+    let home = TempDirectory::new("binary-json-arguments");
+    let commands = FakeCommands::new("Running");
+
+    for arguments in [
+        &["install", "--json", "--path", "--no-path"][..],
+        &["install", "--json", "--bind", "0.0.0.0"][..],
+        &["install", "--port", "--json"][..],
+    ] {
+        let output = run_install_with_fake_tailscale(&home, &commands, arguments);
+
+        assert_eq!(output.status.code(), Some(2), "{arguments:?}: {output:?}");
+        let json = stdout_json(&output);
+        assert_eq!(json["ok"], false, "{arguments:?}");
+        assert_eq!(json["error"]["kind"], "invalid_arguments", "{arguments:?}: {json}");
+        assert!(!json["error"]["message"].as_str().unwrap().is_empty());
+    }
+    assert_eq!(std::fs::read_dir(&home.0).unwrap().count(), 0);
+}
+
+/// `PURRDR_YES` 不合法時，`--json` 也輸出 JSON(kind `invalid_environment`)。
+#[cfg(unix)]
+#[test]
+fn json_reports_an_invalid_purrdr_yes_as_json() {
+    let home = TempDirectory::new("binary-json-invalid-yes");
+    let commands = FakeCommands::new("Running");
+
+    let output = run_install_with_environment(&home, &commands, &["install", "--json"], &[("PURRDR_YES", "maybe")]);
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json = stdout_json(&output);
+    assert_eq!(json["error"]["kind"], "invalid_environment", "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("PURRDR_YES"), "{json}");
+}
+
+/// 抓不到家目錄(`HOME` 沒設)時，`--json` 也輸出 JSON(kind `host_environment`)。
+#[cfg(unix)]
+#[test]
+fn json_reports_a_missing_home_as_json() {
+    let commands = FakeCommands::new("Running");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_purrdr-host-service"))
+        .args(["install", "--json"])
+        .env_clear()
+        .env("PATH", &commands.bin)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let json = stdout_json(&output);
+    assert_eq!(json["error"]["kind"], "host_environment", "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("HOME"), "{json}");
+}
+
+/// 環境變數不合法時，說明與 JSON 的重跑指令都要先清掉那個變數，照著貼才真的能跑。
+#[cfg(unix)]
+#[test]
+fn an_invalid_environment_variable_comes_with_a_rerun_that_clears_it() {
+    let home = TempDirectory::new("binary-invalid-env-rerun");
+    let commands = FakeCommands::new("Running");
+
+    let json_output = run_install_with_environment(&home, &commands, &["install", "--json"], &[("PURRDR_PORT", "abc")]);
+    let text_output = run_install_with_environment(&home, &commands, &["install"], &[("PURRDR_PORT", "abc")]);
+
+    let json = stdout_json(&json_output);
+    assert!(json["rerun_command"].as_str().unwrap().starts_with("unset PURRDR_PORT; "), "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("unset PURRDR_PORT; "), "{json}");
+    let stderr = String::from_utf8_lossy(&text_output.stderr);
+    assert!(stderr.contains("unset PURRDR_PORT; "), "{stderr}");
 }

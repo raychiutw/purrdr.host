@@ -5,9 +5,9 @@
 
 use serde_json::{Value, json};
 
-use super::settings::Sourced;
+use super::settings::{InstallSettings, Sourced};
 use super::system::HostSystem;
-use super::{InstallError, InstallOptions, InstallQuestion, Installed, Installer};
+use super::{InstallError, InstallOptions, InstallQuestion, Installed, Installer, describe_skipped};
 
 /// 要不要用終端機詢問使用者。`assume_yes` 已含 `PURRDR_YES=1`;`--json` 隱含不詢問。
 pub fn asks_questions(assume_yes: bool, json: bool, environment: impl Fn(&str) -> Option<String>, stdin_terminal: bool, stdout_terminal: bool) -> bool {
@@ -30,12 +30,7 @@ pub fn install_without_prompting<S: HostSystem>(
         // 預設的 HTTPS 埠被占用:不詢問，直接用建議值(只有使用者明確指定的埠被占用才報錯，那在 `install` 裡處理);
         // 原因記進警告。
         InstallQuestion::UseAnotherHttpsPort { alternative, skipped, .. } => {
-            let reasons = skipped
-                .iter()
-                .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
-                .collect::<Vec<_>>()
-                .join("; ");
-            port_changes.push(format!("HTTPS {reasons}; using HTTPS {alternative} instead"));
+            port_changes.push(format!("HTTPS {}; using HTTPS {alternative} instead", describe_skipped(skipped)));
             true
         }
         InstallQuestion::CertificateTransparency { .. } if assume_yes => {
@@ -61,29 +56,36 @@ fn sourced<T: Into<Value> + Clone>(setting: &Sourced<T>) -> Value {
     json!({ "value": setting.value.clone().into(), "source": setting.source.as_str() })
 }
 
+fn settings_json(settings: &InstallSettings) -> Value {
+    json!({
+        "port": sourced(&settings.port),
+        "https_port": sourced(&settings.https_port),
+        "herdr_session": sourced(&settings.herdr_session),
+        "auto_update": sourced(&settings.auto_update),
+        "add_to_path": sourced(&settings.add_to_path),
+    })
+}
+
 /// `--json` 成功時的輸出:HTTPS 網址、各設定的值與來源、警告、配對指令。
 pub fn success_json(installed: &Installed) -> Value {
-    let settings = &installed.settings;
     json!({
         "ok": true,
         "https_address": installed.https_address,
-        "settings": {
-            "port": sourced(&settings.port),
-            "https_port": sourced(&settings.https_port),
-            "herdr_session": sourced(&settings.herdr_session),
-            "auto_update": sourced(&settings.auto_update),
-            "add_to_path": sourced(&settings.add_to_path),
-        },
+        "settings": settings_json(&installed.settings),
         "warnings": installed.warnings,
         "pair_command": installed.pair_command,
     })
 }
 
-/// `--json` 失敗時的輸出:錯誤種類與說明，加上重跑指令。
-pub fn failure_json(error: &InstallError, rerun: &str) -> Value {
-    json!({
+/// `--json` 失敗時的輸出:錯誤種類與說明，加上重跑指令;已解析到設定時(`settings`)也帶上各項的值與來源。
+pub fn failure_json(error: &InstallError, rerun: &str, settings: Option<&InstallSettings>) -> Value {
+    let mut output = json!({
         "ok": false,
         "error": { "kind": error.kind(), "message": error.explain(rerun) },
         "rerun_command": rerun,
-    })
+    });
+    if let Some(settings) = settings {
+        output["settings"] = settings_json(settings);
+    }
+    output
 }

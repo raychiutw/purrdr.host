@@ -19,9 +19,10 @@ pub mod system;
 mod tailscale;
 mod user_path;
 
-pub use command::run_command;
+pub use command::{report_invalid_arguments, run_command};
 pub use command_alias::CommandAlias;
 pub use location::{HelperLauncher, InstalledService};
+use settings::yes_no;
 use system::HostSystem;
 use tailscale::Tailscale;
 
@@ -89,11 +90,10 @@ pub struct HostStatus {
 
 impl std::fmt::Display for HostStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let yes_no = |value: bool| if value { "yes" } else { "no" };
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
         if let Some(auto_update) = self.auto_update {
-            writeln!(formatter, "  auto update: {}", if auto_update { "on" } else { "off" })?;
+            writeln!(formatter, "  auto update: {}", settings::on_off(auto_update))?;
         }
         writeln!(formatter, "  logs: {}", self.log_directory.display())?;
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
@@ -137,7 +137,7 @@ impl HostEnvironment {
     pub fn resolve(platform: InstallPlatform, variable: impl Fn(&str) -> Option<String>, current_executable: PathBuf) -> Result<Self, InstallError> {
         let non_empty = |name: &str| variable(name).filter(|value| !value.is_empty());
         let home_variable = if platform == InstallPlatform::Windows { "USERPROFILE" } else { "HOME" };
-        let home = non_empty(home_variable).ok_or_else(|| InstallError::Io(format!("{home_variable} is not set")))?;
+        let home = non_empty(home_variable).ok_or_else(|| InstallError::HostEnvironment(format!("{home_variable} is not set")))?;
         Ok(HostEnvironment {
             platform,
             home: PathBuf::from(home),
@@ -152,7 +152,7 @@ impl HostEnvironment {
 
     /// 這個行程的主機資訊。
     pub fn from_process() -> Result<Self, InstallError> {
-        let current_executable = std::env::current_exe().map_err(InstallError::io)?;
+        let current_executable = std::env::current_exe().map_err(|error| InstallError::HostEnvironment(format!("cannot find this program: {error}")))?;
         Self::resolve(InstallPlatform::current(), |name| std::env::var(name).ok(), current_executable)
     }
 }
@@ -240,7 +240,7 @@ impl InstallCommand {
             match option.as_str() {
                 "--port" => {
                     let text = value()?;
-                    port = Some(text.parse().map_err(|_| format!("invalid port: {text}"))?);
+                    port = Some(text.parse().ok().filter(|port| *port != 0).ok_or_else(|| format!("invalid port: {text}"))?);
                 }
                 "--https-port" => {
                     let text = value()?;
@@ -274,16 +274,11 @@ impl InstallCommand {
 
     /// 同一個指令加上 `--yes`(同意憑證公開後重跑用)。
     pub fn agreeing(&self) -> Self {
-        match self {
-            InstallCommand::Install { .. } => {
-                let mut command = self.clone();
-                if let InstallCommand::Install { assume_yes, .. } = &mut command {
-                    *assume_yes = true;
-                }
-                command
-            }
-            other => other.clone(),
+        let mut command = self.clone();
+        if let InstallCommand::Install { assume_yes, .. } = &mut command {
+            *assume_yes = true;
         }
+        command
     }
 }
 
@@ -301,6 +296,15 @@ pub struct InstallOptions {
 pub struct SkippedHttpsPort {
     pub port: u16,
     pub handlers: String,
+}
+
+/// 被跳過的候選埠與占用者,例如 `443 is used by / -> http://127.0.0.1:8765; 8443 is used by …`。
+pub fn describe_skipped(skipped: &[SkippedHttpsPort]) -> String {
+    skipped
+        .iter()
+        .map(|skipped| format!("{} is used by {}", skipped.port, skipped.handlers))
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 /// HTTPS 埠的建議值：`port` 是第一個可用的候選埠(沒有時 `None`),`skipped` 是它前面被別人占用的候選埠。
@@ -394,25 +398,7 @@ pub struct Installed {
 impl Installed {
     /// 每一項最後採用的值與來源(沒辦法詢問時印出，讓使用者知道裝了什麼)。
     pub fn settings_summary(&self) -> String {
-        let settings = &self.settings;
-        let yes_no = |value: bool| if value { "yes" } else { "no" };
-        [
-            "Settings:".to_owned(),
-            format!("  Local port: {} ({})", settings.port.value, settings.port.source),
-            format!("  HTTPS port: {} ({})", settings.https_port.value, settings.https_port.source),
-            format!(
-                "  herdr session: {} ({})",
-                settings.herdr_session.value.as_deref().unwrap_or("default"),
-                settings.herdr_session.source
-            ),
-            format!(
-                "  Auto update: {} ({})",
-                if settings.auto_update.value { "on" } else { "off" },
-                settings.auto_update.source
-            ),
-            format!("  Add to PATH: {} ({})", yes_no(settings.add_to_path.value), settings.add_to_path.source),
-        ]
-        .join("\n")
+        self.settings.summary()
     }
 }
 
@@ -552,6 +538,12 @@ pub enum InstallError {
     Autostart(String),
     NotInstalled,
     Io(String),
+    /// 命令列參數不合法(`--json` 時也以 JSON 回報)。
+    InvalidArguments(String),
+    /// `PURRDR_*` 環境變數的值不合法。
+    InvalidEnvironment(settings::SettingsError),
+    /// 抓不到執行安裝需要的主機資訊(例如家目錄的環境變數沒設)。
+    HostEnvironment(String),
 }
 
 impl std::fmt::Display for InstallError {
@@ -626,6 +618,9 @@ impl InstallError {
             ),
             InstallError::Io(message) => format!("{message}\nNext: fix the problem above, {then_rerun}"),
             InstallError::NotInstalled => "The Purrdr host service is not installed.".to_owned(),
+            InstallError::InvalidArguments(message) => format!("{message}\nNext: see the install options with:\n  {rerun}"),
+            InstallError::InvalidEnvironment(error) => error.explain(rerun),
+            InstallError::HostEnvironment(message) => format!("{message}\nNext: run the install from a normal user session (with HOME or USERPROFILE set)."),
         }
     }
 
@@ -645,6 +640,9 @@ impl InstallError {
             InstallError::Autostart(_) => "autostart_failed",
             InstallError::NotInstalled => "not_installed",
             InstallError::Io(_) => "io_error",
+            InstallError::InvalidArguments(_) => "invalid_arguments",
+            InstallError::InvalidEnvironment(_) => "invalid_environment",
+            InstallError::HostEnvironment(_) => "host_environment",
         }
     }
 
@@ -791,11 +789,17 @@ enum PortUse {
 pub struct Installer<S: HostSystem> {
     environment: HostEnvironment,
     system: S,
+    /// 最近一次 `install` 已解析到的設定(安裝失敗時仍可讀，讓呼叫端說明各項設定與來源)。
+    attempted: Option<settings::InstallSettings>,
 }
 
 impl<S: HostSystem> Installer<S> {
     pub fn new(environment: HostEnvironment, system: S) -> Self {
-        Installer { environment, system }
+        Installer {
+            environment,
+            system,
+            attempted: None,
+        }
     }
 
     /// 安裝用的系統(測試檢查假系統狀態)。
@@ -806,6 +810,11 @@ impl<S: HostSystem> Installer<S> {
     /// 安裝用的系統(測試調整假系統狀態)。
     pub fn system_mut(&mut self) -> &mut S {
         &mut self.system
+    }
+
+    /// 最近一次 `install` 已解析到的設定;還沒解析到(例如讀安裝紀錄就失敗)時 `None`。
+    pub fn attempted_settings(&self) -> Option<&settings::InstallSettings> {
+        self.attempted.as_ref()
     }
 
     /// 取回安裝用的系統(測試接著交給更新流程)。
@@ -822,9 +831,10 @@ impl<S: HostSystem> Installer<S> {
     pub fn install(&mut self, options: &InstallOptions, mut confirm: impl FnMut(&InstallQuestion) -> bool) -> Result<Installed, InstallError> {
         let layout = self.layout();
         let previous = self.read_record(&layout)?;
+        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
+        self.attempted = Some(settings.clone());
         let tailscale = Tailscale::locate(&mut self.system, self.environment.platform)?;
         let host_name = tailscale.host_name(&mut self.system)?;
-        let mut settings = settings::InstallSettings::from_options(&options.requested, previous.as_ref().map(InstallRecord::settings_snapshot));
         let preferred = settings.https_port.value;
         let (https_port, serve_in_place) = match self.check_https_port(&tailscale, preferred, settings.port.value, previous.as_ref())? {
             PortUse::Free => (preferred, false),
@@ -852,8 +862,9 @@ impl<S: HostSystem> Installer<S> {
                 }
                 settings.https_port = settings::Sourced {
                     value: alternative,
-                    source: settings::Source::Default,
+                    source: settings::Source::Suggested,
                 };
+                self.attempted = Some(settings.clone());
                 (alternative, false)
             }
         };
@@ -949,7 +960,7 @@ impl<S: HostSystem> Installer<S> {
             if let Some(alternative) = alternative {
                 settings.https_port = settings::Sourced {
                     value: alternative,
-                    source: settings::Source::Default,
+                    source: settings::Source::Suggested,
                 };
             }
             https_port_conflict = Some(HttpsPortConflict {

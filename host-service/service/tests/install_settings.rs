@@ -66,6 +66,7 @@ fn empty_environment_variables_count_as_unset() {
 fn invalid_environment_values_name_the_variable_and_give_the_rerun_command() {
     for (name, value) in [
         ("PURRDR_PORT", "abc"),
+        ("PURRDR_PORT", "0"),
         ("PURRDR_HTTPS_PORT", "0"),
         ("PURRDR_AUTO_UPDATE", "yes"),
         ("PURRDR_ADD_TO_PATH", "2"),
@@ -77,6 +78,25 @@ fn invalid_environment_values_name_the_variable_and_give_the_rerun_command() {
         assert!(message.contains(name) && message.contains(value), "{message}");
         assert!(message.contains("sh install.sh --"), "{message}");
     }
+}
+
+/// 變數還設著，原樣重跑只會再失敗;重跑指令要先清掉那個變數(依平台:POSIX `unset`、PowerShell `Remove-Item Env:`)。
+#[test]
+fn the_rerun_command_for_a_bad_variable_clears_it_first() {
+    let error = RequestedSettings::resolve(&command("install"), environment(&[("PURRDR_PORT", "abc")])).unwrap_err();
+
+    assert_eq!(
+        error.rerun_without_variable("purrdr install --yes", InstallPlatform::Linux),
+        "unset PURRDR_PORT; purrdr install --yes"
+    );
+    assert_eq!(
+        error.rerun_without_variable("purrdr install --yes", InstallPlatform::MacOs),
+        "unset PURRDR_PORT; purrdr install --yes"
+    );
+    assert_eq!(
+        error.rerun_without_variable("purrdr install --yes", InstallPlatform::Windows),
+        "Remove-Item Env:PURRDR_PORT; purrdr install --yes"
+    );
 }
 
 #[test]

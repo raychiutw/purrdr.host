@@ -5,6 +5,7 @@ mod install_support;
 use install_support::{FQDN, FakeSystem, TestHost, occupy_https_port, snapshot};
 
 use purrdr_host_service::install::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
+use purrdr_host_service::install::settings::Source;
 use purrdr_host_service::install::{InstallError, InstallPlatform, InstallQuestion, Installer};
 
 fn no_environment(_: &str) -> Option<String> {
@@ -114,7 +115,7 @@ fn success_json_has_address_settings_with_sources_warnings_and_pair_command() {
 
 #[test]
 fn failure_json_has_the_error_and_the_rerun_command() {
-    let json = failure_json(&InstallError::TailscaleMissing, "purrdr install --json");
+    let json = failure_json(&InstallError::TailscaleMissing, "purrdr install --json", None);
 
     assert_eq!(json["ok"], false);
     assert_eq!(json["error"]["kind"], "tailscale_missing");
@@ -126,7 +127,7 @@ fn failure_json_has_the_error_and_the_rerun_command() {
 fn consent_failure_json_says_consent_is_needed() {
     let error = InstallError::ConsentRequired { notice: "notice text".into() };
 
-    let json = failure_json(&error, "purrdr install --json --yes");
+    let json = failure_json(&error, "purrdr install --json --yes", None);
 
     assert_eq!(json["error"]["kind"], "consent_required");
     assert!(json["error"]["message"].as_str().unwrap().contains("notice text"), "{json}");
@@ -148,6 +149,11 @@ fn taken_default_https_port_switches_to_the_suggestion_without_asking_and_says_w
 
     assert_eq!(installed.https_address, format!("https://{FQDN}:8443"));
     assert_eq!(installed.settings.https_port.value, 8443);
+    assert_eq!(installed.settings.https_port.source, Source::Suggested, "自動換埠不是預設值");
+    assert_eq!(
+        success_json(&installed)["settings"]["https_port"],
+        serde_json::json!({ "value": 8443, "source": "suggested" })
+    );
     let warning = installed.warnings.join("\n");
     assert!(warning.contains("443 is used by / -> http://127.0.0.1:8765"), "{warning}");
     assert!(warning.contains("8443"), "{warning}");
@@ -181,4 +187,46 @@ fn fails_only_when_every_candidate_https_port_is_taken() {
     let error = install_without_prompting(&mut installer, &host.options(47_820), true, |_| {}).unwrap_err();
 
     assert!(matches!(error, InstallError::ServePortTaken { available: None, .. }), "{error:?}");
+}
+
+#[test]
+fn a_failed_install_still_knows_the_settings_it_resolved() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+
+    let error = install_without_prompting(&mut installer, &host.options(47_820), false, |_| {}).unwrap_err();
+
+    assert!(matches!(error, InstallError::ConsentRequired { .. }));
+    let settings = installer.attempted_settings().expect("中途停止也要有解析到的設定");
+    assert_eq!((settings.port.value, settings.port.source), (47_820, Source::Argument));
+    assert_eq!((settings.https_port.value, settings.https_port.source), (443, Source::Default));
+    let summary = settings.summary();
+    assert!(
+        summary.contains("Local port: 47820 (argument)") && summary.contains("HTTPS port: 443 (default)"),
+        "{summary}"
+    );
+}
+
+#[test]
+fn stopping_on_a_taken_https_port_reports_the_port_that_was_asked_for() {
+    let (host, mut installer) = taken_default_port_host();
+
+    let error = install_without_prompting(&mut installer, &host.options_on_https_port(47_820, 443), true, |_| {}).unwrap_err();
+
+    assert!(matches!(error, InstallError::ServePortTaken { .. }));
+    let settings = installer.attempted_settings().unwrap();
+    assert_eq!((settings.https_port.value, settings.https_port.source), (443, Source::Argument));
+}
+
+#[test]
+fn failure_json_carries_the_settings_when_there_are_any() {
+    let host = TestHost::new(InstallPlatform::Linux);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    let error = install_without_prompting(&mut installer, &host.options(47_820), false, |_| {}).unwrap_err();
+
+    let json = failure_json(&error, "purrdr install --yes", installer.attempted_settings());
+
+    assert_eq!(json["settings"]["port"], serde_json::json!({ "value": 47_820, "source": "argument" }));
+    assert_eq!(json["settings"]["https_port"], serde_json::json!({ "value": 443, "source": "default" }));
+    assert!(failure_json(&error, "x", None).get("settings").is_none());
 }

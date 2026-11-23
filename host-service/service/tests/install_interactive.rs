@@ -63,6 +63,18 @@ fn summary_says_why_the_default_https_port_was_skipped_and_which_one_is_used() {
 }
 
 #[test]
+fn a_suggested_https_port_is_labelled_suggested_in_the_plan_and_the_result() {
+    let (host, mut installer) = host_with(InstallPlatform::MacOs);
+    occupy_https_port(installer.system_mut(), 443, "http://127.0.0.1:8765");
+
+    let plan = installer.plan(&defaults(&host)).unwrap();
+    let installed = install_interactively(&mut installer, defaults(&host), &mut ScriptedPrompter::new(&[""])).unwrap();
+
+    assert_eq!((plan.settings.https_port.value, plan.settings.https_port.source), (8443, Source::Suggested));
+    assert_eq!(installed.settings.https_port.source, Source::Suggested);
+}
+
+#[test]
 fn cancel_changes_nothing() {
     let (host, mut installer) = host_with(InstallPlatform::Linux);
     let system_before = installer.system().state.clone();
@@ -120,12 +132,13 @@ fn customizing_asks_each_setting_with_its_default_and_blank_keeps_the_default() 
 fn customizing_rejects_bad_ports_and_taken_https_ports_and_asks_again() {
     let (host, mut installer) = host_with(InstallPlatform::Windows);
     occupy_https_port(installer.system_mut(), 8443, "http://127.0.0.1:3000");
-    let mut prompter = ScriptedPrompter::new(&["2", "abc", "70000", "47821", "0", "8443", "10000", "", "", "", ""]);
+    let mut prompter = ScriptedPrompter::new(&["2", "abc", "70000", "0", "47821", "0", "8443", "10000", "", "", "", ""]);
 
     let installed = install_interactively(&mut installer, defaults(&host), &mut prompter).unwrap();
 
     let screen = &prompter.transcript;
     assert!(screen.contains("not a port number"), "{screen}");
+    assert!(!screen.contains("0-65535"), "本機埠也不接受 0:{screen}");
     assert!(screen.contains("8443 is used by / -> http://127.0.0.1:3000"), "{screen}");
     assert_eq!(installed.settings.port.value, 47_821);
     assert_eq!(installed.settings.https_port.value, 10_000);

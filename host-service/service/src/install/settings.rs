@@ -18,6 +18,8 @@ pub enum Source {
     Default,
     /// 互動安裝時使用者輸入的值。
     Prompt,
+    /// 安裝程式在預設值被占用時自動改用的建議值(警告會說明被跳過的埠)。
+    Suggested,
 }
 
 impl Source {
@@ -29,6 +31,7 @@ impl Source {
             Source::Previous => "previous",
             Source::Default => "default",
             Source::Prompt => "prompt",
+            Source::Suggested => "suggested",
         }
     }
 }
@@ -39,6 +42,21 @@ impl std::fmt::Display for Source {
     }
 }
 
+/// 摘要裡的「yes／no」。
+pub fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// 摘要裡的「on／off」。
+pub fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
+}
+
+/// 沒指定 herdr session 時顯示 `default`。
+pub fn session_name(session: &Option<String>) -> &str {
+    session.as_deref().unwrap_or("default")
+}
+
 /// 一個帶來源的設定值。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sourced<T> {
@@ -47,7 +65,7 @@ pub struct Sourced<T> {
 }
 
 impl<T> Sourced<T> {
-    /// 使用者(參數或環境變數)明確指定的值，不是沿用或預設。
+    /// 使用者(參數、環境變數或互動輸入)明確指定的值，不是沿用、預設或自動建議。
     pub fn is_explicit(&self) -> bool {
         matches!(self.source, Source::Argument | Source::Environment | Source::Prompt)
     }
@@ -73,6 +91,21 @@ pub struct InstallSettings {
     pub add_to_path: Sourced<bool>,
 }
 
+impl InstallSettings {
+    /// 每一項的值與來源,一項一行(沒辦法詢問時印出，讓使用者知道採用了什麼)。
+    pub fn summary(&self) -> String {
+        [
+            "Settings:".to_owned(),
+            format!("  Local port: {} ({})", self.port.value, self.port.source),
+            format!("  HTTPS port: {} ({})", self.https_port.value, self.https_port.source),
+            format!("  herdr session: {} ({})", session_name(&self.herdr_session.value), self.herdr_session.source),
+            format!("  Auto update: {} ({})", on_off(self.auto_update.value), self.auto_update.source),
+            format!("  Add to PATH: {} ({})", yes_no(self.add_to_path.value), self.add_to_path.source),
+        ]
+        .join("\n")
+    }
+}
+
 /// 環境變數的值不合法。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SettingsError {
@@ -88,6 +121,17 @@ impl SettingsError {
             "invalid {}={}: expected {}.\nFix or unset the variable, or pass the option instead, then run:\n  {rerun}",
             self.variable, self.value, self.expected
         )
+    }
+}
+
+impl SettingsError {
+    /// 重跑指令:變數還設著的話原樣重跑只會再失敗，所以先清掉它(POSIX 用 `unset`,Windows PowerShell 用 `Remove-Item Env:`)。
+    pub fn rerun_without_variable(&self, rerun: &str, platform: super::InstallPlatform) -> String {
+        if platform == super::InstallPlatform::Windows {
+            format!("Remove-Item Env:{}; {rerun}", self.variable)
+        } else {
+            format!("unset {}; {rerun}", self.variable)
+        }
     }
 }
 
@@ -142,11 +186,11 @@ impl RequestedSettings {
                 }),
             }
         }
-        let port_number = |text: &str| text.parse::<u16>().ok();
-        let https_port_number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
+        // 0 不是可用的埠(本機埠與 HTTPS 埠一樣)。
+        let port_number = |text: &str| text.parse::<u16>().ok().filter(|port| *port != 0);
         Ok(RequestedSettings {
-            port: decide(port, "PURRDR_PORT", "a port number (0-65535)", &environment, port_number)?,
-            https_port: decide(https_port, "PURRDR_HTTPS_PORT", "a port number (1-65535)", &environment, https_port_number)?,
+            port: decide(port, "PURRDR_PORT", "a port number (1-65535)", &environment, port_number)?,
+            https_port: decide(https_port, "PURRDR_HTTPS_PORT", "a port number (1-65535)", &environment, port_number)?,
             herdr_session: decide(herdr_session, "PURRDR_SESSION", "a herdr session name", &environment, |text| {
                 Some(text.to_owned())
             })?,
