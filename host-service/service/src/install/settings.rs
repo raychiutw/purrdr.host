@@ -91,6 +91,17 @@ impl SettingsError {
     }
 }
 
+impl SettingsError {
+    /// 重跑指令:變數還設著的話原樣重跑只會再失敗，所以先清掉它(POSIX 用 `unset`,Windows PowerShell 用 `Remove-Item Env:`)。
+    pub fn rerun_without_variable(&self, rerun: &str, platform: super::InstallPlatform) -> String {
+        if platform == super::InstallPlatform::Windows {
+            format!("Remove-Item Env:{}; {rerun}", self.variable)
+        } else {
+            format!("unset {}; {rerun}", self.variable)
+        }
+    }
+}
+
 impl std::fmt::Display for SettingsError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(formatter, "invalid {}={}: expected {}", self.variable, self.value, self.expected)

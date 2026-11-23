@@ -340,3 +340,20 @@ fn json_reports_a_missing_home_as_json() {
     assert_eq!(json["error"]["kind"], "host_environment", "{json}");
     assert!(json["error"]["message"].as_str().unwrap().contains("HOME"), "{json}");
 }
+
+/// 環境變數不合法時，說明與 JSON 的重跑指令都要先清掉那個變數，照著貼才真的能跑。
+#[cfg(unix)]
+#[test]
+fn an_invalid_environment_variable_comes_with_a_rerun_that_clears_it() {
+    let home = TempDirectory::new("binary-invalid-env-rerun");
+    let commands = FakeCommands::new("Running");
+
+    let json_output = run_install_with_environment(&home, &commands, &["install", "--json"], &[("PURRDR_PORT", "abc")]);
+    let text_output = run_install_with_environment(&home, &commands, &["install"], &[("PURRDR_PORT", "abc")]);
+
+    let json = stdout_json(&json_output);
+    assert!(json["rerun_command"].as_str().unwrap().starts_with("unset PURRDR_PORT; "), "{json}");
+    assert!(json["error"]["message"].as_str().unwrap().contains("unset PURRDR_PORT; "), "{json}");
+    let stderr = String::from_utf8_lossy(&text_output.stderr);
+    assert!(stderr.contains("unset PURRDR_PORT; "), "{stderr}");
+}

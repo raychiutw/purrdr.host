@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use super::interactive::{TerminalPrompter, install_interactively};
 use super::location::InstalledService;
 use super::non_interactive::{asks_questions, failure_json, install_without_prompting, success_json};
-use super::settings::{RequestedSettings, assume_yes};
+use super::settings::{RequestedSettings, SettingsError, assume_yes};
 use super::system::{CommandOutput, HostSystem, ProcessHostSystem};
 use super::{HostEnvironment, InstallCommand, InstallError, InstallOptions, InstallQuestion, Installer, rerun_install_command, shell_quoted};
 use crate::herdr_socket::SocketEnvironment;
@@ -53,13 +53,18 @@ pub async fn run_command(command: InstallCommand) -> ExitCode {
                     ExitCode::FAILURE
                 }
             };
+            // 環境變數不合法:重跑指令要先清掉那個變數。
+            let fail_invalid_environment = |error: SettingsError| {
+                let rerun = error.rerun_without_variable(&rerun, platform);
+                fail_install(&InstallError::InvalidEnvironment(error), &rerun)
+            };
             let requested = match RequestedSettings::resolve(&command, environment) {
                 Ok(requested) => requested,
-                Err(error) => return fail_install(&InstallError::InvalidEnvironment(error), &rerun),
+                Err(error) => return fail_invalid_environment(error),
             };
             let assume_yes = match assume_yes(&command, environment) {
                 Ok(assume_yes) => assume_yes,
-                Err(error) => return fail_install(&InstallError::InvalidEnvironment(error), &rerun),
+                Err(error) => return fail_invalid_environment(error),
             };
             let options = InstallOptions { requested, source_directory };
             let interactive = asks_questions(assume_yes, json, environment, std::io::stdin().is_terminal(), std::io::stdout().is_terminal());
