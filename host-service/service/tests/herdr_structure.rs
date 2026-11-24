@@ -169,6 +169,103 @@ async fn tab_rename_of_missing_tab_keeps_herdr_error_code() {
 }
 
 #[tokio::test]
+async fn tab_create_is_forwarded_without_focus_and_returns_the_tab_and_its_root_pane() {
+    let herdr = herdr_with(vec![("tab.create", platform_recorded("tab.create.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client
+        .request(json!({"type": "tab.create", "request_id": "r2", "workspace_id": "w3", "label": "build-logs"}))
+        .await;
+
+    assert_eq!(
+        reply,
+        json!({"type": "tab.create.result", "request_id": "r2", "tab_id": "w3:t2", "root_pane_id": "w3:p2"})
+    );
+    assert_eq!(
+        forwarded(&herdr, "tab.create"),
+        json!({"workspace_id": "w3", "label": "build-logs", "focus": false})
+    );
+}
+
+#[tokio::test]
+async fn tab_create_without_label_leaves_the_name_to_herdr() {
+    let herdr = herdr_with(vec![("tab.create", platform_recorded("tab.create.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    client.request(json!({"type": "tab.create", "request_id": "r2", "workspace_id": "w3"})).await;
+
+    assert_eq!(forwarded(&herdr, "tab.create"), json!({"workspace_id": "w3", "focus": false}));
+}
+
+#[tokio::test]
+async fn tab_create_rejects_unsafe_workspace_ids_and_blank_labels() {
+    for (workspace_id, label) in [
+        ("-w1", None),
+        ("w1;rm", None),
+        ("", None),
+        ("w1", Some("")),
+        ("w1", Some("   ")),
+        ("w1", Some("a\nb")),
+    ] {
+        let mut request = json!({"type": "tab.create", "request_id": "r2", "workspace_id": workspace_id});
+        if let Some(label) = label {
+            request["label"] = json!(label);
+        }
+        rejected_without_reaching_herdr(request, "tab.create").await;
+    }
+}
+
+#[tokio::test]
+async fn tab_create_in_missing_workspace_keeps_herdr_error_code() {
+    let herdr = herdr_with(vec![("tab.create", platform_recorded("error.tab-create-workspace-not-found.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client.request(json!({"type": "tab.create", "request_id": "r2", "workspace_id": "w99"})).await;
+
+    assert_eq!(reply["code"], "herdr_error");
+    assert_eq!(reply["herdr_code"], "workspace_not_found");
+}
+
+#[tokio::test]
+async fn tab_close_is_forwarded() {
+    let herdr = herdr_with(vec![("tab.close", platform_recorded("tab.close.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client.request(json!({"type": "tab.close", "request_id": "r2", "tab_id": "w3:t2"})).await;
+
+    assert_eq!(reply, json!({"type": "tab.close.result", "request_id": "r2"}));
+    assert_eq!(forwarded(&herdr, "tab.close"), json!({"tab_id": "w3:t2"}));
+}
+
+#[tokio::test]
+async fn tab_close_rejects_unsafe_ids() {
+    for tab_id in ["-t1", "t1;rm", ""] {
+        rejected_without_reaching_herdr(json!({"type": "tab.close", "request_id": "r2", "tab_id": tab_id}), "tab.close").await;
+    }
+}
+
+#[tokio::test]
+async fn tab_close_of_missing_tab_keeps_herdr_error_code() {
+    let herdr = herdr_with(vec![("tab.close", platform_recorded("error.tab-close-not-found.ndjson"))]).await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client.request(json!({"type": "tab.close", "request_id": "r2", "tab_id": "w1:t99"})).await;
+
+    assert_eq!(reply["code"], "herdr_error");
+    assert_eq!(reply["herdr_code"], "tab_not_found");
+}
+
+#[tokio::test]
 async fn workspace_rename_rejects_unsafe_ids_and_blank_labels() {
     for (workspace_id, label) in [("-w1", "garden"), ("w1;rm", "garden"), ("", "garden"), ("w1", "")] {
         rejected_without_reaching_herdr(
@@ -310,7 +407,8 @@ async fn agent_start_is_forwarded_with_the_claude_permission_mode_as_arguments()
 
     let reply = client.request(agent_start("r2")).await;
 
-    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2"}));
+    // 假 herdr 沒回 agent.get(讀不到 Agent 狀態):不能確認就緒，保守回 launch_pending true。
+    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2", "launch_pending": true}));
     assert_eq!(
         forwarded(&herdr, "agent.start"),
         json!({
@@ -321,6 +419,86 @@ async fn agent_start_is_forwarded_with_the_claude_permission_mode_as_arguments()
             "timeout_ms": 60000
         })
     );
+}
+
+/// untrusted 資料夾實測的 agent.get,但狀態改成還沒進入 blocked(模擬 Agent 啟動中)。
+fn agent_get_still_starting() -> Value {
+    let mut reply = platform_recorded("agent.get.blocked-launch-pending.ndjson");
+    reply["result"]["agent"]["agent_status"] = json!("unknown");
+    reply
+}
+
+#[tokio::test]
+async fn agent_start_reports_launch_pending_false_once_the_agent_is_ready() {
+    let herdr = herdr_with(vec![
+        ("agent.start", platform_recorded("agent.start.ndjson")),
+        ("agent.get", platform_recorded("agent.get.ready.ndjson")),
+    ])
+    .await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client.request(agent_start("r2")).await;
+
+    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2", "launch_pending": false}));
+    assert_eq!(forwarded(&herdr, "agent.get"), json!({"target": "feature-sketch"}));
+}
+
+#[tokio::test]
+async fn agent_start_polls_until_launch_pending_clears() {
+    let herdr = herdr_with(vec![
+        ("agent.start", platform_recorded("agent.start.ndjson")),
+        ("agent.get", platform_recorded("agent.get.ready.ndjson")),
+    ])
+    .await;
+    herdr.reply_once("agent.get", agent_get_still_starting());
+    herdr.reply_once("agent.get", agent_get_still_starting());
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    let reply = client.request(agent_start("r2")).await;
+
+    assert_eq!(reply["launch_pending"], false);
+    let polls = herdr.methods().iter().filter(|method| *method == "agent.get").count();
+    assert_eq!(polls, 3);
+}
+
+#[tokio::test]
+async fn agent_start_returns_launch_pending_true_right_away_when_the_agent_is_blocked() {
+    let herdr = herdr_with(vec![
+        ("agent.start", platform_recorded("agent.start.ndjson")),
+        ("agent.get", platform_recorded("agent.get.blocked-launch-pending.ndjson")),
+    ])
+    .await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+
+    client.send(agent_start("r2")).await;
+    let reply = client.receive_within(Duration::from_secs(5)).await;
+
+    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2", "launch_pending": true}));
+}
+
+#[tokio::test]
+async fn agent_start_returns_launch_pending_true_when_still_starting_at_timeout() {
+    let herdr = herdr_with(vec![
+        ("agent.start", platform_recorded("agent.start.ndjson")),
+        ("agent.get", agent_get_still_starting()),
+    ])
+    .await;
+    let service = start_service(herdr.socket.clone()).await;
+    let mut client = TestClient::connect(&service).await;
+    client.request(hello("r1")).await;
+    let mut request = agent_start("r2");
+    request["timeout_ms"] = json!(3001);
+
+    client.send(request).await;
+    let reply = client.receive_within(Duration::from_secs(10)).await;
+
+    assert_eq!(reply["launch_pending"], true);
 }
 
 #[tokio::test]
@@ -416,6 +594,8 @@ fn every_operation(folder: &TempDir) -> Vec<Value> {
         json!({"type": "workspace.create", "request_id": "r2", "cwd": path_text(folder)}),
         json!({"type": "workspace.rename", "request_id": "r3", "workspace_id": "w1", "label": "garden-notes"}),
         json!({"type": "tab.rename", "request_id": "r7", "tab_id": "w1:t1", "label": "build-logs"}),
+        json!({"type": "tab.create", "request_id": "r8", "workspace_id": "w1", "label": "build-logs"}),
+        json!({"type": "tab.close", "request_id": "r9", "tab_id": "w1:t2"}),
         json!({"type": "workspace.close", "request_id": "r4", "workspace_id": "w2"}),
         json!({"type": "worktree.create", "request_id": "r5", "workspace_id": "w1", "branch": "feature/sketch"}),
         agent_start("r6"),
@@ -464,6 +644,8 @@ async fn read_only_device_is_refused_and_audited_with_the_target_workspace_or_pa
             json!(["workspace.create", null, null, false]),
             json!(["workspace.rename", "w1", null, false]),
             json!(["tab.rename", null, null, false]),
+            json!(["tab.create", "w1", null, false]),
+            json!(["tab.close", null, null, false]),
             json!(["workspace.close", "w2", null, false]),
             json!(["worktree.create", "w1", null, false]),
             json!(["agent.start", null, "w3:p1", false]),
