@@ -98,6 +98,10 @@ pub enum ClientMessage {
     WorkspaceRename(WorkspaceRename),
     #[serde(rename = "tab.rename")]
     TabRename(TabRename),
+    #[serde(rename = "tab.create")]
+    TabCreate(TabCreate),
+    #[serde(rename = "tab.close")]
+    TabClose(TabClose),
     #[serde(rename = "workspace.close")]
     WorkspaceClose(WorkspaceClose),
     #[serde(rename = "worktree.create")]
@@ -139,7 +143,7 @@ pub enum ClientMessage {
 impl ClientMessage {
     /// 寫入類訊息(schema 的 `x-write`);唯讀裝置送出時被拒絕。
     pub fn is_write(&self) -> bool {
-        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::ClaudeUsageInstall(_) | ClientMessage::ClaudeUsageRemove(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::TabRename(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
+        matches!(self, ClientMessage::PaneSendKeys(_) | ClientMessage::PaneSendText(_) | ClientMessage::AgentPrompt(_) | ClientMessage::PaneTerminalInput(_) | ClientMessage::PaneTerminalResize(_) | ClientMessage::PaneTerminalScroll(_) | ClientMessage::PushInstall(_) | ClientMessage::PushRemove(_) | ClientMessage::PushUpdateMuted(_) | ClientMessage::PushTest(_) | ClientMessage::ClaudeUsageInstall(_) | ClientMessage::ClaudeUsageRemove(_) | ClientMessage::WorkspaceCreate(_) | ClientMessage::WorkspaceRename(_) | ClientMessage::TabRename(_) | ClientMessage::TabCreate(_) | ClientMessage::TabClose(_) | ClientMessage::WorkspaceClose(_) | ClientMessage::WorktreeCreate(_) | ClientMessage::AgentStart(_) | ClientMessage::FileUploadStart(_) | ClientMessage::FileUploadChunk(_) | ClientMessage::DevicesRevoke(_) | ClientMessage::HostServiceUpdate(_) | ClientMessage::HostServiceSetAutoUpdate(_) | ClientMessage::QueueAdd(_) | ClientMessage::QueueRemove(_) | ClientMessage::QueueReorder(_))
     }
 }
 
@@ -223,6 +227,10 @@ pub enum ServerMessage {
     WorkspaceRenameResult(WorkspaceRenameResult),
     #[serde(rename = "tab.rename.result")]
     TabRenameResult(TabRenameResult),
+    #[serde(rename = "tab.create.result")]
+    TabCreateResult(TabCreateResult),
+    #[serde(rename = "tab.close.result")]
+    TabCloseResult(TabCloseResult),
     #[serde(rename = "workspace.close.result")]
     WorkspaceCloseResult(WorkspaceCloseResult),
     #[serde(rename = "worktree.create.result")]
@@ -881,6 +889,37 @@ pub struct TabRenameResult {
     pub label: Option<String>,
 }
 
+/// 在既有 workspace 新增 tab(herdr tab.create,不搶桌機焦點)。新增聊天 = tab.create 後對 root pane 送 agent.start。workspace 不存在時以 herdr_error 回報(herdr_code workspace_not_found)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabCreate {
+    pub request_id: String,
+    pub workspace_id: String,
+    /// tab 名稱,不可空白;省略時由 herdr 以序號命名。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+/// tab 已建立;聊天開在 root_pane_id。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabCreateResult {
+    pub request_id: String,
+    pub tab_id: String,
+    pub root_pane_id: String,
+}
+
+/// 關閉 tab(herdr tab.close):裡面的 pane 與程序都會停止。關掉 workspace 的最後一個 tab 時,herdr 連 workspace 一起關(實測 herdr 0.9.5:仍回成功、不回錯誤);若那是 herdr 唯一的 workspace,herdr 會另開一個空的新 workspace(新的 workspace_id)。app 要關最後一個 tab 前應先提示使用者「會一併關閉這個 Workspace」。tab 不存在時以 herdr_error 回報(herdr_code tab_not_found)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabClose {
+    pub request_id: String,
+    pub tab_id: String,
+}
+
+/// tab 已關閉。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TabCloseResult {
+    pub request_id: String,
+}
+
 /// 關閉 workspace(herdr workspace.close):裡面的 tab、pane 與程序都會停止。不連同 worktree 群組一起關，同 repo 的 worktree workspace 還開著時以 herdr_error 回報(herdr_code workspace_group_close_required)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceClose {
@@ -946,10 +985,12 @@ pub enum ClaudePermissionMode {
     BypassPermissions,
 }
 
-/// Agent 已在 pane 啟動。
+/// Agent 已在 pane 啟動。herdr 0.9.5 的 agent.start 一律立刻回成功(agent 帶 launch_pending:true,連已信任資料夾也是),不等 Agent 就緒;所以主機服務在 herdr 回成功後輪詢 herdr 的 agent.get,等到 launch_pending 消失(Agent 已就緒)、停在 blocked(例如資料夾尚未被 Claude 信任,要有人在桌機回答)或超過 timeout_ms(省略時 30 秒),再回報最終的 launch_pending。讀不到 Agent 狀態時保守回 true。launch_pending 為 true 時 app 不要立刻送 agent.prompt(會得到 herdr_error:agent_not_ready 或 agent_blocked),應把第一則訊息留在輸入框。agent.prompt 在 Agent 尚未就緒時回 herdr_error(herdr_code agent_not_ready:Agent 還在啟動,herdr 訊息 "is not an active named agent";agent_blocked:Agent 在等互動輸入,例如信任資料夾)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentStartResult {
     pub request_id: String,
+    /// Agent 是否仍未就緒(見上):false = 已就緒可送 agent.prompt;true = 仍在啟動、停在 blocked 或等待逾時。
+    pub launch_pending: bool,
 }
 
 /// 列出工作資料夾過去的 Claude／Codex session(raychiutw/purrdr.host#32),給續接用。Claude 讀 <設定目錄>/projects/<cwd 轉成的資料夾名>/*.jsonl;Codex 讀 sessions/ 下 session_meta 的 cwd 等於這個資料夾的 rollout。只回 id、最後修改時間與第一則使用者訊息的摘要，依修改時間新到舊，最多 50 筆。

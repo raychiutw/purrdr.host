@@ -188,7 +188,7 @@ async fn resuming_claude_passes_resume_after_the_permission_mode() {
         }))
         .await;
 
-    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2"}));
+    assert_eq!(reply, json!({"type": "agent.start.result", "request_id": "r2", "launch_pending": true}));
     assert_eq!(
         forwarded_start(&herdr),
         json!({"name": "garden-resume", "kind": "claude", "pane_id": "w9:p1", "args": ["--permission-mode", "plan", "--resume", OLDER]})

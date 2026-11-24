@@ -10,8 +10,9 @@ use crate::herdr_client::HerdrClient;
 use crate::http::blocking;
 use crate::pane_terminal;
 use crate::protocol::{
-    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, TabRename, TabRenameResult, WorkspaceClose, WorkspaceCloseResult,
-    WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename, WorkspaceRenameResult, WorktreeCreate, WorktreeCreateResult,
+    AgentStart, AgentStartResult, ErrorCode, ResumableAgentKind, ServerMessage, TabClose, TabCloseResult, TabCreate, TabCreateResult, TabRename,
+    TabRenameResult, WorkspaceClose, WorkspaceCloseResult, WorkspaceCreate, WorkspaceCreateResult, WorkspaceRename, WorkspaceRenameResult, WorktreeCreate,
+    WorktreeCreateResult,
 };
 use crate::session_history;
 use crate::transcript::TranscriptEnvironment;
@@ -30,6 +31,9 @@ const AGENT_START_TIMEOUT_MS: std::ops::RangeInclusive<i64> = 3001..=300_000;
 
 /// 沒帶 timeout_ms 時 herdr 等 Agent 就緒的時間。
 const DEFAULT_AGENT_START_TIMEOUT_MS: u64 = 30_000;
+
+/// 輪詢 Agent 是否就緒的間隔。
+const LAUNCH_POLL_INTERVAL: Duration = Duration::from_millis(300);
 
 /// 在主機上的資料夾建立 workspace,回傳 root pane。
 pub async fn workspace_create(herdr: &HerdrClient, request: WorkspaceCreate) -> ServerMessage {
@@ -90,6 +94,38 @@ pub async fn tab_rename(herdr: &HerdrClient, request: TabRename) -> ServerMessag
             label: result["tab"]["label"].as_str().map(str::to_owned),
         }),
         Err(failure) => herdr_error(request.request_id, "tab.rename", failure),
+    }
+}
+
+/// 在既有 workspace 新增 tab,回傳 tab 與 root pane。
+pub async fn tab_create(herdr: &HerdrClient, request: TabCreate) -> ServerMessage {
+    if !is_valid_id(&request.workspace_id) || request.label.as_deref().is_some_and(|label| !is_valid_label(label)) {
+        return invalid(request.request_id, "invalid workspace_id or label");
+    }
+    let mut params = json!({"workspace_id": request.workspace_id, "focus": false});
+    if let Some(label) = request.label {
+        params["label"] = json!(label);
+    }
+    match herdr.request("tab.create", params).await {
+        Ok(result) => ServerMessage::TabCreateResult(TabCreateResult {
+            request_id: request.request_id,
+            tab_id: result["tab"]["tab_id"].as_str().unwrap_or_default().to_owned(),
+            root_pane_id: result["root_pane"]["pane_id"].as_str().unwrap_or_default().to_owned(),
+        }),
+        Err(failure) => herdr_error(request.request_id, "tab.create", failure),
+    }
+}
+
+/// 關閉 tab。
+pub async fn tab_close(herdr: &HerdrClient, request: TabClose) -> ServerMessage {
+    if !is_valid_id(&request.tab_id) {
+        return invalid(request.request_id, "invalid tab_id");
+    }
+    match herdr.request("tab.close", json!({"tab_id": request.tab_id})).await {
+        Ok(_) => ServerMessage::TabCloseResult(TabCloseResult {
+            request_id: request.request_id,
+        }),
+        Err(failure) => herdr_error(request.request_id, "tab.close", failure),
     }
 }
 
@@ -173,10 +209,33 @@ pub async fn agent_start(herdr: &HerdrClient, request: AgentStart, transcripts: 
     }
     // 絕不比 herdr 先放棄：否則 app 重試會在同一個 pane 再啟動一個 Agent。
     match herdr.request_waiting("agent.start", params, herdr_wait + CREATION_WAIT).await {
-        Ok(_) => ServerMessage::AgentStartResult(AgentStartResult {
-            request_id: request.request_id,
-        }),
+        Ok(_) => {
+            let launch_pending = wait_until_launched(herdr, &request.name, herdr_wait).await;
+            ServerMessage::AgentStartResult(AgentStartResult {
+                request_id: request.request_id,
+                launch_pending,
+            })
+        }
         Err(failure) => herdr_error(request.request_id, "agent.start", failure),
+    }
+}
+
+/// herdr 的 agent.start 立刻回成功(agent 帶 launch_pending)，不等就緒:輪詢 agent.get 到 launch_pending 消失(回 false)、
+/// 停在 blocked(例如資料夾尚未信任，等不到就緒，回 true)或超過 budget(回 true);讀不到狀態時保守回 true。
+async fn wait_until_launched(herdr: &HerdrClient, name: &str, budget: Duration) -> bool {
+    let deadline = tokio::time::Instant::now() + budget;
+    loop {
+        let Ok(result) = herdr.request("agent.get", json!({"target": name})).await else {
+            return true;
+        };
+        let agent = &result["agent"];
+        if agent["launch_pending"].as_bool() != Some(true) {
+            return false;
+        }
+        if agent["agent_status"] == "blocked" || tokio::time::Instant::now() >= deadline {
+            return true;
+        }
+        tokio::time::sleep(LAUNCH_POLL_INTERVAL).await;
     }
 }
 
