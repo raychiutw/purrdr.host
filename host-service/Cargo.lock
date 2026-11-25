@@ -1683,6 +1683,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml",
+ "unicode-normalization",
  "ureq",
  "windows-sys 0.61.2",
  "zip",

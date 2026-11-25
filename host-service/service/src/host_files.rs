@@ -12,23 +12,24 @@ use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 
 use crate::host_path_mentions;
 use crate::protocol::{EXCLUDED_FILE_LOCATIONS, FileStatus, MAXIMUM_FILE_CHUNK, MAXIMUM_FILE_SIZE, TEMPORARY_FILE_LOCATIONS, UPLOAD_FOLDER};
 use crate::text_format::hex;
 use crate::uploads::legacy_upload_path;
 
-/// 路徑任何位置連續出現排除清單的段落(不分大小寫;`*` 結尾比對段落開頭)。
+/// 路徑任何位置連續出現排除清單的段落(折疊後比對;`*` 結尾比對段落開頭)。
 pub fn is_excluded(path: &Path) -> bool {
     let segments: Vec<String> = path
         .components()
         .filter_map(|component| match component {
-            Component::Normal(segment) => Some(segment.to_string_lossy().to_lowercase()),
+            Component::Normal(segment) => Some(folded(&segment.to_string_lossy())),
             _ => None,
         })
         .collect();
     EXCLUDED_FILE_LOCATIONS.iter().any(|location| {
-        let pattern: Vec<String> = location.to_lowercase().split('/').map(str::to_owned).collect();
+        let pattern: Vec<String> = location.split('/').map(folded).collect();
         segments.windows(pattern.len()).any(|window| {
             window.iter().zip(&pattern).all(|(actual, expected)| match expected.strip_suffix('*') {
                 Some(prefix) => actual.starts_with(prefix),
@@ -36,6 +37,11 @@ pub fn is_excluded(path: &Path) -> bool {
             })
         })
     })
+}
+
+/// NFKC 後大寫再轉小寫:`ſ`→`s`、`ﬅ`→`st`、`ß`→`ss`、`K`→`k`,不分大小寫的檔案系統會把它們開到同一個名稱。
+fn folded(segment: &str) -> String {
+    segment.nfkc().collect::<String>().to_uppercase().to_lowercase()
 }
 
 /// 主機服務的環境：家目錄、暫存目錄與主機服務資料夾(`--state-dir`,一律拒讀)。
