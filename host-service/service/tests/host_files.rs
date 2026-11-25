@@ -385,6 +385,41 @@ async fn browser_profiles_shell_history_and_secret_files_are_denied_under_the_wo
 }
 
 #[tokio::test]
+async fn excluded_names_spelled_with_unicode_lookalikes_are_denied_under_the_working_directory() {
+    let fixture = Fixture::start().await;
+    let mut client = fixture.client().await;
+    let lookalikes = [
+        ".\u{17F}sh/id_ed25519",
+        ".git-credential\u{17F}",
+        ".password-\u{FB05}ore/entry.gpg",
+        ".pa\u{DF}word-store/entry.gpg",
+        ".con\u{FB01}g/gcloud/credentials.db",
+        ".purrdr/host-\u{17F}ervice/devices.json",
+        ".claude/.credential\u{17F}.json",
+        ".bash_hi\u{17F}tory",
+        ".\u{212A}ube/config",
+    ];
+
+    for lookalike in lookalikes {
+        let file = fixture.in_project(lookalike, b"hello");
+        let reply = client.request(stat(&file)).await;
+        assert_eq!(reply["status"], "denied", "{lookalike:?}");
+    }
+}
+
+#[tokio::test]
+async fn a_lookalike_path_to_an_existing_excluded_folder_is_denied() {
+    let fixture = Fixture::start().await;
+    let mut client = fixture.client().await;
+    let real = fixture.in_project(".ssh/id_ed25519", b"secret");
+    let lookalike = real.parent().unwrap().parent().unwrap().join(".\u{17F}sh").join("id_ed25519");
+
+    let reply = client.request(stat(&lookalike)).await;
+
+    assert_eq!(reply["status"], "denied");
+}
+
+#[tokio::test]
 async fn the_configured_state_directory_is_denied_even_under_the_working_directory() {
     let fixture = Fixture::start_with(FixtureOptions {
         state_directory: Some("ledger/service-state"),
