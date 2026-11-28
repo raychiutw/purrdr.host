@@ -82,10 +82,8 @@ fn whole_tail(file: &mut File, size: u64) -> Result<Vec<Record>, TranscriptFailu
         if !ordinary.is_empty() {
             return Ok(newest_within_budget(&content, ordinary));
         }
-        if start == 0 {
-            return Ok(stripped_records(&content));
-        }
-        if bytes >= PREVIEW_MAX_BYTES {
+        // 掃到檔頭仍沒有任何一般大小的行:只剩超大行，與到達上限時一樣回 TooLarge,不把超大行放進預覽。
+        if start == 0 || bytes >= PREVIEW_MAX_BYTES {
             return Err(TranscriptFailure::TooLarge);
         }
         bytes = (bytes * 4).min(PREVIEW_MAX_BYTES);

@@ -336,3 +336,20 @@ fn reading_while_the_transcript_is_being_written_returns_only_complete_and_curre
     writer.join().unwrap();
     assert!(rounds > 1);
 }
+
+#[test]
+fn a_small_file_made_only_of_oversized_lines_is_too_large_instead_of_returning_them() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("only-huge.jsonl");
+    // 3 行各約 100 KB:整個檔案不到 8 MiB，但沒有任何一行不超過 48000 bytes。
+    let content: String = (1..=3).map(|sequence| huge_line(sequence, 100_000)).collect();
+    std::fs::write(&path, content).unwrap();
+
+    let result = transcript_reads::preview(&path, None);
+
+    assert!(
+        matches!(result, Err(transcript::TranscriptFailure::TooLarge)),
+        "超大行不該放進預覽:{:?}",
+        result.map(|preview| preview.records.len())
+    );
+}
