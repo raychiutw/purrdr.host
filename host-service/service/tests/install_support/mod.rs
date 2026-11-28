@@ -181,6 +181,8 @@ pub struct SystemState {
     pub background_processes: Vec<Vec<String>>,
     /// Windows 使用者層級 PATH(`HKCU\Environment` 的 `Path`);None 表示沒有這個值。
     pub user_path: Option<String>,
+    /// 新程序啟動時 `running.json` 還留著上一個程序的記載的次數(真的服務會因此記「上次未正常關閉」)。
+    pub stale_marker_starts: u32,
 }
 
 /// 另一個工具已經用 `tailscale serve` 占用的 HTTPS 埠(例如 Allymote 的 443)。
@@ -262,7 +264,11 @@ impl FakeSystem {
         };
         let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         let marker = json!({"version": version, "port": self.service_port, "pid": 4242, "started_at_ms": started_at});
-        std::fs::write(self.home.join(".purrdr/host-service/running.json"), marker.to_string()).unwrap();
+        let marker_file = self.home.join(".purrdr/host-service/running.json");
+        if marker_file.exists() {
+            self.state.stale_marker_starts += 1;
+        }
+        std::fs::write(marker_file, marker.to_string()).unwrap();
         if let Some(port) = self.service_port {
             self.service_listener = Some(TcpListener::bind(("127.0.0.1", port)).expect("假主機服務的埠被占用"));
         }
@@ -444,6 +450,8 @@ impl FakeSystem {
                     return failed("Unit not found\n");
                 }
                 self.stop_service();
+                // SIGTERM 讓真的服務走正常關閉並清掉自己的 running.json。
+                let _ = std::fs::remove_file(self.home.join(".purrdr/host-service/running.json"));
                 self.start_service(&self.installed_executable());
                 self.state.systemd_active.insert((*unit).into());
                 ok("")
