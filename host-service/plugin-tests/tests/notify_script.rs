@@ -1019,6 +1019,41 @@ fi
         assert!(seconds <= 10, "{seconds}");
     }
 
+    /// 重複 working 寫下的 invalid 標記也要在 24 小時後過期(以檔案修改時間判斷),否則該 pane 之後每次 working 都重寫 invalid
+    #[test]
+    fn an_invalid_marker_expires_after_a_day() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write(".purrdr/plugin-state/work-w2_p1", "working_since=invalid\n");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+        std::fs::File::options().write(true).open(host.work_file()).unwrap().set_modified(old).unwrap();
+
+        host.run_status("working");
+        host.run_status("done");
+
+        let seconds = work_seconds_of(&host).and_then(|seconds| seconds.as_u64()).expect("done 帶 workSeconds");
+        assert!(seconds <= 10, "{seconds}");
+    }
+
+    /// invalid 標記還沒過期時,重複的 working 不重寫它(否則修改時間被刷新,永遠不會過期)
+    #[test]
+    fn a_fresh_invalid_marker_keeps_its_modified_time_on_repeated_working() {
+        let host = Host::new();
+        host.write(".purrdr/plugin-state/work-w2_p1", "working_since=invalid\n");
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options()
+            .write(true)
+            .open(host.work_file())
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
+
+        host.run_status("working");
+
+        let modified = std::fs::metadata(host.work_file()).unwrap().modified().unwrap();
+        assert_eq!(modified, earlier);
+    }
+
     /// blocked 結束這一段工作(使用者介入):之後再 working 是新的一段，done 只算新的一段
     #[test]
     fn blocked_ends_the_work_segment() {
@@ -1712,6 +1747,29 @@ mod notify_ps1 {
         seed_start(&host, 3000);
         host.run_hook_with_status("blocked");
         assert!(!work_file(&host).exists());
+    }
+
+    /// 重複 working 寫下的 invalid 標記 24 小時後(以檔案修改時間)過期;未過期時不重寫、修改時間不變(與 notify_sh 同一組情境)
+    #[test]
+    fn an_invalid_marker_expires_after_a_day() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        let path = work_file(&host);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "working_since=invalid\n").unwrap();
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3 * 86400);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        host.run_hook_with_status("working");
+        host.run_hook_with_status("done");
+        let seconds = backend.bodies()[0]["workSeconds"].as_u64().expect("done 帶 workSeconds");
+        assert!(seconds <= 15, "{seconds}");
+
+        let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::write(&path, "working_since=invalid\n").unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(earlier).unwrap();
+        host.run_hook_with_status("working");
+        assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), earlier);
     }
 
     /// 用量跨過 80／95:各送一則(不帶 workspace、pane、tab),同一週期不重送

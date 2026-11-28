@@ -61,11 +61,22 @@ if ($pane) {
         $stale = $false
         if (Test-Path -LiteralPath $workFile -PathType Leaf) {
             $since = Read-WorkStart $workFile
-            if ($null -ne $since -and ($now - $since) -gt 86400) { $stale = $true }
+            if ($null -ne $since) {
+                if (($now - $since) -gt 86400) { $stale = $true }
+            } else {
+                # 讀不出開始時間(例如 invalid 標記):改用檔案修改時間套同樣的 24 小時過期。
+                try {
+                    $modified = ([DateTimeOffset](Get-Item -LiteralPath $workFile -ErrorAction Stop).LastWriteTimeUtc).ToUnixTimeSeconds()
+                    if (($now - $modified) -gt 86400) { $stale = $true }
+                } catch {}
+            }
         }
         if ((Test-Path -LiteralPath $workFile -PathType Leaf) -and -not $stale) {
             # 上一段還沒結束又收到 working(重複或亂序):這一段的開始時間不可信,作廢(留到 done 或 blocked 才清)。
-            Write-State $workFile 'working_since=invalid'
+            # 已經是 invalid 就不重寫,讓修改時間停在第一次作廢的時候,24 小時後才過得了期。
+            $existing = $null
+            try { $existing = Get-Content -LiteralPath $workFile -ErrorAction Stop | Select-Object -First 1 } catch {}
+            if ($existing -cne 'working_since=invalid') { Write-State $workFile 'working_since=invalid' }
         } else {
             Write-State $workFile "working_since=$now"
         }

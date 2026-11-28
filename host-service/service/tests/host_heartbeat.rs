@@ -19,6 +19,8 @@ type Reply = Result<(u16, String), String>;
 struct FakeTransport {
     sent: Arc<Mutex<Vec<(String, Value)>>>,
     replies: Arc<Mutex<Vec<Reply>>>,
+    /// 依序套在每次請求上的延遲(用完不延遲),模擬慢的後台。
+    delays: Arc<Mutex<Vec<Duration>>>,
     notify: Option<mpsc::Sender<()>>,
 }
 
@@ -27,11 +29,16 @@ impl FakeTransport {
         FakeTransport {
             sent: Arc::default(),
             replies: Arc::default(),
+            delays: Arc::default(),
             notify: None,
         }
     }
     fn reply_with(self, replies: Vec<Reply>) -> Self {
         *self.replies.lock().unwrap() = replies;
+        self
+    }
+    fn delay_with(self, delays: Vec<Duration>) -> Self {
+        *self.delays.lock().unwrap() = delays;
         self
     }
     fn sent(&self) -> Vec<(String, Value)> {
@@ -42,6 +49,11 @@ impl FakeTransport {
 impl HeartbeatTransport for FakeTransport {
     fn post(&mut self, endpoint: &str, body: &str) -> Reply {
         self.sent.lock().unwrap().push((endpoint.to_owned(), serde_json::from_str(body).unwrap()));
+        let delay = {
+            let mut delays = self.delays.lock().unwrap();
+            if delays.is_empty() { Duration::ZERO } else { delays.remove(0) }
+        };
+        std::thread::sleep(delay);
         let reply = {
             let mut replies = self.replies.lock().unwrap();
             if replies.is_empty() {
@@ -261,6 +273,25 @@ async fn schedule_reports_sleeping_before_sleep_acknowledges_after_and_reports_o
         let _ = beats.recv_timeout(Duration::from_millis(50));
     }
     assert_eq!(transport.sent().last().unwrap().1, json!({"key": KEY, "state": "online"}));
+    task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sleep_report_is_not_held_up_by_a_heartbeat_in_flight() {
+    // 第一次心跳卡 3 秒(慢的後台);macOS 只等 5 秒就放行睡眠,睡眠回報不能排在它後面。
+    let home = tempfile::tempdir().unwrap();
+    pair(home.path(), "phone", "https://a.example.test/v1/push", KEY);
+    let transport = FakeTransport::new().delay_with(vec![Duration::from_secs(3)]);
+    let (signals, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (task, _beats) = spawn_run(home.path(), &transport, Some(receiver));
+    while transport.sent().is_empty() {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let (ack, acknowledged) = SleepAck::channel();
+    signals.send(SleepSignal::WillSleep(ack)).unwrap();
+    acknowledged.recv_timeout(Duration::from_secs(1)).expect("睡眠回報被進行中的心跳擋住");
+    assert!(transport.sent().iter().any(|(_, body)| body["state"] == "sleeping"), "{:?}", transport.sent());
     task.abort();
 }
 

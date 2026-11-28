@@ -547,7 +547,9 @@ async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str,
                 && newly_paused
                 && let Some(home) = home
             {
-                push(herdr, home, pane_id, "queue_paused", None).await;
+                // 推播要抓 snapshot 再等 HTTP,不能卡住事件迴圈:與其他推播一樣 spawn 出去。
+                let (herdr, home, pane_id) = (herdr.clone(), home.to_owned(), pane_id.to_owned());
+                tokio::spawn(async move { push(&herdr, &home, &pane_id, "queue_paused", None).await });
             }
             return;
         }

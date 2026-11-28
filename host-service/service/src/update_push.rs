@@ -13,6 +13,7 @@ pub trait PushTransport: Send {
 }
 
 /// 以 HTTP 送(正式)。
+#[derive(Clone)]
 pub struct HttpPushTransport {
     agent: ureq::Agent,
 }
