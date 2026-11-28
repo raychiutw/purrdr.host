@@ -21,6 +21,7 @@ pub mod herdr_cli;
 pub mod herdr_client;
 pub mod herdr_socket;
 pub mod host_files;
+pub mod host_heartbeat;
 pub mod host_path_mentions;
 mod http;
 pub mod install;
@@ -148,6 +149,8 @@ pub struct RunningHostService {
     upload_cleanup: Option<tokio::task::JoinHandle<()>>,
     /// Agent 觀察者的常駐 task。
     observer: Option<tokio::task::JoinHandle<()>>,
+    /// 主機心跳的常駐 task。
+    host_heartbeat: Option<tokio::task::JoinHandle<()>>,
     /// 直接送推播的 lease;停止時收回，外掛才會立刻接回。
     lease: Option<direct_push::Lease>,
     /// 與服務共用 serial 鎖的外掛更新器(自動更新排程用)。
@@ -179,6 +182,9 @@ impl Drop for RunningHostService {
         }
         if let Some(observer) = &self.observer {
             observer.abort();
+        }
+        if let Some(host_heartbeat) = &self.host_heartbeat {
+            host_heartbeat.abort();
         }
         if let Some(lease) = &self.lease {
             lease.remove();
@@ -212,6 +218,15 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         .and(config.transcripts.home.as_deref())
         .map(|home| direct_push::DirectDelivery::new(push.clone(), home, &socket_path));
     let lease = direct.as_ref().map(direct_push::DirectDelivery::lease);
+    // 主機心跳與睡眠回報(raychiutw/purrdr.host#99):同樣需要觀察者(正式執行)與家目錄。
+    let host_heartbeat = config.observer.and(config.transcripts.home.clone()).map(|home| {
+        tokio::spawn(host_heartbeat::run(
+            home,
+            update_push::HttpPushTransport::default(),
+            host_heartbeat::Schedule::default(),
+            host_heartbeat::system_sleep_signals(),
+        ))
+    });
     let observer = config.observer.map(|options| {
         let observer = agent_observer::AgentObserver::load(&config.state_directory);
         let task = agent_observer::spawn(herdr.clone(), observer.clone(), options, config.transcripts.home.clone(), direct);
@@ -249,5 +264,6 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         observer: observer.map(|(_, task)| task),
         lease,
         plugin_updater,
+        host_heartbeat,
     })
 }
