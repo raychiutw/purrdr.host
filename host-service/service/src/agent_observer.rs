@@ -296,7 +296,7 @@ pub(crate) fn spawn(
                         .collect();
                     statuses = current;
                     for pane_id in finished {
-                        send_next(&herdr, &observer, &pane_id).await;
+                        send_next(&herdr, &observer, &pane_id, home.as_deref()).await;
                     }
                 }
                 let mut sending = match &direct {
@@ -321,7 +321,7 @@ pub(crate) fn spawn(
                                 attention.status(&pane_id, &status, now);
                                 let previous = statuses.insert(pane_id.clone(), status.clone());
                                 if previous.as_deref() == Some("working") && is_finished(&status) {
-                                    send_next(&herdr, &observer, &pane_id).await;
+                                    send_next(&herdr, &observer, &pane_id, home.as_deref()).await;
                                 }
                                 // 只在「事件」上送、狀態有變才送;重連後的 snapshot 對帳不補送(斷線期間可能已由外掛接手)。
                                 if sending
@@ -528,18 +528,27 @@ fn status_change(event: &Value) -> Option<(String, String)> {
     Some((data["pane_id"].as_str()?.to_owned(), data["agent_status"].as_str()?.to_owned()))
 }
 
-/// 送出佇列第一則：比對通過才送，送出後從佇列移除;session 不符時暫停並標記;herdr 失敗時留著等下次。
-async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str) {
+/// 送出佇列第一則：比對通過才送，送出後從佇列移除;session 不符時暫停並標記(並推播 `queue_paused`,raychiutw/purrdr.host#97);herdr 失敗時留著等下次。
+async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str, home: Option<&Path>) {
     let Some(item) = observer.next(pane_id) else {
         return;
     };
     match pane_guard::check(herdr, pane_id, Some(&item.expected_session), None).await {
         Ok(()) => {}
         Err(GuardFailure::Changed(_)) => {
-            let _ = observer.change(pane_id, None, |queue| {
+            // 只在「由未暫停變成暫停」時推播:同一次暫停不重送，佇列恢復(移除、重排)後再暫停才會再送。
+            let mut newly_paused = false;
+            let saved = observer.change(pane_id, None, |queue| {
+                newly_paused = queue.paused.is_none();
                 queue.paused = Some(QueuePause::SessionChanged);
                 Ok(())
             });
+            if saved.is_ok()
+                && newly_paused
+                && let Some(home) = home
+            {
+                push(herdr, home, pane_id, "queue_paused").await;
+            }
             return;
         }
         Err(GuardFailure::Herdr { .. }) => return,

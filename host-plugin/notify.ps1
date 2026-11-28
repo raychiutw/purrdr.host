@@ -21,7 +21,67 @@ try {
     exit 0
 }
 $status = [string]$event.data.agent_status
-if ($status -cne 'blocked' -and $status -cne 'done') { exit 0 }
+
+# 0.3.0 起(raychiutw/purrdr.host#96、#98;與 notify.sh 逐段對應,規則見 notify.sh 檔頭):
+# - 完成帶 workSeconds:每個 pane 進入 working 時把開始時間(Unix 秒)寫到 %USERPROFILE%\.purrdr\plugin-state\work-<pane>(不以 push- 開頭),
+#   done 時讀出、算秒數並刪掉;算不出來(沒有開始時間、重複 working、時間倒退、檔案壞掉、超過 24 小時前的殘留)一律省略欄位。blocked 結束一段工作。
+# - 方案用量:每次狀態改變讀 %USERPROFILE%\.purrdr\claude-usage\usage.json,five_hour／seven_day 的 used_percentage 跨過 80／95 就各送一則
+#   usage(不帶 workspace、pane、tab);沒有用量檔或沒有 resets_at(或已過期)就不送;plugin-state\usage-sent 記該週期該門檻已送過。
+# - lease 新鮮時 usage 與 workSeconds 也讓位(整個事件不送),但開始時間照記、done 照清。
+$stateDir = Join-Path $env:USERPROFILE '.purrdr\plugin-state'
+$pane = [string]$event.data.pane_id
+if ($pane -notmatch '^[A-Za-z0-9:_.-]{1,64}$') { $pane = $null }
+
+# 原子寫入狀態檔(UTF-8 無 BOM);失敗略過(狀態只是輔助,不影響推播)。
+function Write-State([string]$path, [string]$contents) {
+    try {
+        New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+        $temporary = "$path.$PID"
+        [System.IO.File]::WriteAllText($temporary, $contents + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        Move-Item -LiteralPath $temporary -Destination $path -Force
+    } catch {}
+}
+
+# 讀 working_since= 的值:只接受不帶前導零的 1–12 位數字,其餘回 $null。
+function Read-WorkStart([string]$path) {
+    try {
+        $line = Get-Content -LiteralPath $path -ErrorAction Stop | Where-Object { $_ -like 'working_since=*' } | Select-Object -First 1
+        $value = [string]($line -replace '^working_since=', '')
+        if ($value -match '^[1-9][0-9]{0,11}$') { return [long]$value }
+    } catch {}
+    return $null
+}
+
+# 每個 pane 的工作開始時間。done 時算出的秒數放 $workSeconds(算不出來是 $null)。
+$workSeconds = $null
+if ($pane) {
+    $workFile = Join-Path $stateDir ('work-' + $pane.Replace(':', '_'))
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if ($status -ceq 'working') {
+        $stale = $false
+        if (Test-Path -LiteralPath $workFile -PathType Leaf) {
+            $since = Read-WorkStart $workFile
+            if ($null -ne $since -and ($now - $since) -gt 86400) { $stale = $true }
+        }
+        if ((Test-Path -LiteralPath $workFile -PathType Leaf) -and -not $stale) {
+            # 上一段還沒結束又收到 working(重複或亂序):這一段的開始時間不可信,作廢(留到 done 或 blocked 才清)。
+            Write-State $workFile 'working_since=invalid'
+        } else {
+            Write-State $workFile "working_since=$now"
+        }
+    } elseif ($status -ceq 'done') {
+        if (Test-Path -LiteralPath $workFile -PathType Leaf) {
+            $since = Read-WorkStart $workFile
+            if ($null -ne $since) {
+                $elapsed = $now - $since
+                if ($elapsed -ge 0 -and $elapsed -le 86400) { $workSeconds = $elapsed }
+            }
+            Remove-Item -LiteralPath $workFile -Force -ErrorAction SilentlyContinue
+        }
+    } else {
+        Remove-Item -LiteralPath $workFile -Force -ErrorAction SilentlyContinue
+    }
+}
 
 function ConvertTo-ComparableSocket([string]$path) {
     return $path.Replace('/', '\').TrimEnd('\').ToLowerInvariant()
@@ -46,8 +106,90 @@ function Test-HostServiceSending {
 
 if (Test-HostServiceSending) { exit 0 }
 
-$pane = [string]$event.data.pane_id
-if ($pane -notmatch '^[A-Za-z0-9:_.-]{1,64}$') { $pane = $null }
+# 對一支配對裝置送一則請求,回 HTTP 狀態碼(成功 200;連不上等沒有回應回 0)。
+# 後台回 410(裝置已被遠端關閉、配對撤銷)就刪掉那支裝置的配對資料夾;送出期間重新配對了(密鑰換了)就不刪。
+function Send-Push($directory, [string]$file, [string]$key, [string]$endpoint, $body) {
+    try {
+        Invoke-RestMethod -Method Post -Uri $endpoint -ContentType 'application/json' -TimeoutSec 10 `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))) | Out-Null
+        return 200
+    } catch {
+        $response = $_.Exception.Response
+        $current = (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ -like 'key=*' } | Select-Object -First 1) -replace '^key=', ''
+        if ($response -and [int]$response.StatusCode -eq 410 -and $current -eq $key) {
+            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        if ($response) { return [int]$response.StatusCode }
+        return 0
+    }
+}
+
+# 讀 JSON 數值(只收真正的數字,字串不算),取整數部分;不是數字回 $null。
+function Get-WholeNumber($value) {
+    if ($value -is [int] -or $value -is [long] -or $value -is [double] -or $value -is [decimal]) {
+        if ($value -ge 0 -and $value -lt 1e12) { return [long][math]::Floor([double]$value) }
+    }
+    return $null
+}
+
+# 方案用量(#98):跨過 80／95 且這個週期還沒送過的門檻,逐一送給每支配對裝置。
+function Invoke-UsageCheck {
+    $usageFile = Join-Path $env:USERPROFILE '.purrdr\claude-usage\usage.json'
+    if (-not (Test-Path -LiteralPath $usageFile -PathType Leaf)) { return }
+    try {
+        $limits = (Get-Content -LiteralPath $usageFile -Raw -ErrorAction Stop | ConvertFrom-Json).status_line_input.rate_limits
+    } catch { return }
+    if (-not $limits) { return }
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    $sentFile = Join-Path $stateDir 'usage-sent'
+    $sent = @()
+    if (Test-Path -LiteralPath $sentFile -PathType Leaf) {
+        $sent = @(Get-Content -LiteralPath $sentFile -ErrorAction SilentlyContinue | Where-Object { $_ -match '^[0-9]{1,12}:[0-9]+$' })
+    }
+    $pending = @()
+    foreach ($period in 'five_hour', 'seven_day') {
+        $used = Get-WholeNumber $limits.$period.used_percentage
+        $resets = Get-WholeNumber $limits.$period.resets_at
+        if ($null -eq $used -or $null -eq $resets) { continue }
+        # 已過重置時間:那個視窗已經重置,檔案裡的比例過時了。
+        if ($resets -le $now) { continue }
+        foreach ($threshold in 80, 95) {
+            if ($used -lt $threshold) { continue }
+            if ($sent -contains "${resets}:${threshold}") { continue }
+            $pending += , @($resets, $threshold)
+        }
+    }
+    # 已過期週期的紀錄清掉。
+    $kept = @($sent | Where-Object { [long]($_ -split ':')[0] -gt $now })
+    if ($kept.Count -ne $sent.Count) { Write-State $sentFile ($kept -join "`n") }
+    if ($pending.Count -eq 0) { return }
+    $delivered = @()
+    $paired = Join-Path $env:USERPROFILE '.purrdr'
+    if (-not (Test-Path -LiteralPath $paired)) { return }
+    foreach ($directory in Get-ChildItem -LiteralPath $paired -Directory -Filter 'push-*') {
+        $file = Join-Path $directory.FullName 'pairing'
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
+        $lines = Get-Content -LiteralPath $file
+        $key = ($lines | Where-Object { $_ -like 'key=*' } | Select-Object -First 1) -replace '^key=', ''
+        $endpoint = ($lines | Where-Object { $_ -like 'endpoint=*' } | Select-Object -First 1) -replace '^endpoint=', ''
+        if (-not $key -or -not $endpoint) { continue }
+        foreach ($item in $pending) {
+            $body = [ordered]@{ key = $key; status = 'usage'; agent = 'claude'; threshold = [int]$item[1]; resetsAt = [long]$item[0] }
+            $code = Send-Push $directory $file $key $endpoint $body
+            if ($code -ge 200 -and $code -lt 300) { $delivered += "$($item[0]):$($item[1])" }
+            if ($code -eq 410) { break }
+        }
+    }
+    foreach ($item in $delivered) {
+        if ($sent -notcontains $item) { $sent += $item }
+    }
+    if ($delivered.Count -gt 0) { Write-State $sentFile ($sent -join "`n") }
+}
+
+try { Invoke-UsageCheck } catch {}
+
+# 往下是 blocked／done 的推播;其他狀態(working、idle…)到此為止。
+if ($status -cne 'blocked' -and $status -cne 'done') { exit 0 }
 
 $workspace = $null
 try {
@@ -111,16 +253,8 @@ foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -Filter 'push
     $body = [ordered]@{ key = $key; workspace = $workspace; status = $status }
     if ($pane) { $body.pane = $pane }
     if ($tab) { $body.tab = $tab }
-    try {
-        Invoke-RestMethod -Method Post -Uri $endpoint -ContentType 'application/json' -TimeoutSec 10 `
-            -Body ([System.Text.Encoding]::UTF8.GetBytes(($body | ConvertTo-Json -Compress))) | Out-Null
-    } catch {
-        # 410:裝置已被遠端關閉(配對撤銷),刪掉配對之後不再呼叫後台。其他失敗不重試。
-        $response = $_.Exception.Response
-        # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。
-        $current = (Get-Content -LiteralPath $file -ErrorAction SilentlyContinue | Where-Object { $_ -like 'key=*' } | Select-Object -First 1) -replace '^key=', ''
-        if ($response -and [int]$response.StatusCode -eq 410 -and $current -eq $key) {
-            Remove-Item -LiteralPath $directory.FullName -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
+    # 完成才帶工作秒數(算不出來就省略)。
+    if ($status -ceq 'done' -and $null -ne $workSeconds) { $body.workSeconds = [long]$workSeconds }
+    # 410:裝置已被遠端關閉(配對撤銷),Send-Push 刪掉配對之後不再呼叫後台。其他失敗不重試。
+    Send-Push $directory $file $key $endpoint $body | Out-Null
 }
