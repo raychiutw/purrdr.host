@@ -3,8 +3,11 @@
 //! 只讀 agent_session 指向的檔案：位置由 agent 種類、session 與 cwd 決定，app 不能指定路徑。
 
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
+
+use serde_json::Value;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::herdr_socket::{Platform, SocketEnvironment};
 
@@ -17,6 +20,8 @@ pub struct TranscriptEnvironment {
     pub claude_config_dir: Option<PathBuf>,
     /// `CODEX_HOME`。
     pub codex_home: Option<PathBuf>,
+    /// `GROK_HOME`。
+    pub grok_home: Option<PathBuf>,
 }
 
 impl TranscriptEnvironment {
@@ -31,6 +36,7 @@ impl TranscriptEnvironment {
             home: path(home),
             claude_config_dir: path(&environment.claude_config_dir),
             codex_home: path(&environment.codex_home),
+            grok_home: path(&environment.grok_home),
         }
     }
 }
@@ -50,6 +56,8 @@ pub enum TranscriptFailure {
     NotAllowed,
     /// 主機服務還不支援這種 agent。
     Unsupported,
+    /// 檔案太大：在讀取上限內湊不滿要求的範圍(#108)。
+    TooLarge,
 }
 
 /// herdr 回報的一個 Agent 裡定位對話紀錄用到的部分。
@@ -70,7 +78,11 @@ pub fn locate(environment: &TranscriptEnvironment, session: &AgentSessionInfo) -
         }
         ("codex", "id") => {
             require_safe_id(&session.value)?;
-            locate_codex(environment, &session.value)
+            locate_codex(environment, &session.value, Some(&session.cwd))
+        }
+        ("grok", "id") => {
+            require_safe_id(&session.value)?;
+            locate_grok(environment, &session.value)
         }
         ("agy", "id") => {
             require_safe_id(&session.value)?;
@@ -92,8 +104,10 @@ fn is_safe_reported_path(path: &str) -> bool {
 }
 
 /// `${CODEX_HOME:-~/.codex}` 的 sessions 與 archived_sessions 下的 `rollout-*-<id>.jsonl`(含倒帶的 `_<rolloutId>`,§4.2)。
-/// 不只一個時不猜(SSH 路線會問 Codex 的狀態資料庫;主機服務不執行指令，所以回有歧義)。
-pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
+/// 不只一個時(SSH 路線問 Codex 的狀態資料庫;主機服務不執行指令也不開 SQLite)改看各檔第一行 session_meta:
+/// 先留下 `payload.id` 是這個 session 的，有 `cwd`(pane 的工作目錄)時再留下 cwd 相同的;
+/// 候選有 `cwd` 卻都不符時回有歧義(不略過 cwd 改取最新);還有多個就取 `payload.timestamp` 唯一最新的(倒帶產生的 rollout 較新)。仍分不出來回有歧義，不猜。
+pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str, cwd: Option<&str>) -> Result<PathBuf, TranscriptFailure> {
     let codex_home = codex_home(environment);
     let mut rollouts = Vec::new();
     let mut compressed = false;
@@ -115,6 +129,76 @@ pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str
         0 if compressed => Err(TranscriptFailure::Compressed),
         0 => Err(TranscriptFailure::Absent),
         1 => Ok(rollouts.remove(0)),
+        _ => pick_codex_rollout(rollouts, session_id, cwd),
+    }
+}
+
+fn pick_codex_rollout(rollouts: Vec<PathBuf>, session_id: &str, cwd: Option<&str>) -> Result<PathBuf, TranscriptFailure> {
+    let mut candidates: Vec<(PathBuf, Option<String>, Option<String>)> = rollouts
+        .into_iter()
+        .filter_map(|path| {
+            let meta = codex_session_meta(&path)?;
+            let field = |name: &str| meta.get(name).and_then(Value::as_str).map(str::to_owned);
+            (field("id").as_deref() == Some(session_id)).then(|| (path, field("cwd"), field("timestamp")))
+        })
+        .collect();
+    if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
+        let same_cwd: Vec<_> = candidates
+            .iter()
+            .filter(|(_, candidate, _)| candidate.as_deref() == Some(cwd))
+            .cloned()
+            .collect();
+        if !same_cwd.is_empty() {
+            candidates = same_cwd;
+        } else if candidates.iter().any(|(_, candidate, _)| candidate.is_some()) {
+            // 候選有 cwd 卻沒有一個相符:不靜默略過 cwd 改取最新的(可能選到別的專案),不猜。
+            // 只有候選的 cwd 都讀不到時才退到 timestamp 規則。
+            return Err(TranscriptFailure::Ambiguous);
+        }
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0).0);
+    }
+    let newest = candidates.iter().filter_map(|(_, _, timestamp)| timestamp.as_deref()).max();
+    let mut newest_ones = candidates.iter().filter(|(_, _, timestamp)| newest.is_some() && timestamp.as_deref() == newest);
+    match (newest_ones.next(), newest_ones.next()) {
+        (Some((path, _, _)), None) => Ok(path.clone()),
+        _ => Err(TranscriptFailure::Ambiguous),
+    }
+}
+
+/// rollout 第一行 `session_meta` 的 payload;讀不到或不是 session_meta 回 None。
+fn codex_session_meta(path: &Path) -> Option<Value> {
+    use std::io::{BufRead, BufReader};
+    let mut line = Vec::new();
+    // 第一行可能很長(內含 instructions);讀到換行為止，最多 1 MiB。
+    BufReader::new(File::open(path).ok()?).take(1 << 20).read_until(b'\n', &mut line).ok()?;
+    let object: Value = serde_json::from_slice(&line).ok()?;
+    (object.get("type")?.as_str()? == "session_meta")
+        .then(|| object.get("payload").cloned())
+        .flatten()
+}
+
+/// `${GROK_HOME:-~/.grok}/sessions/<任一層>/<id>/updates.jsonl`(行為規格 §4.3;SSH 腳本是 `find sessions -mindepth 2 -maxdepth 2 -type d -name <id>`)。
+/// 資料夾不只一個回有歧義，沒有回缺席。
+pub(crate) fn locate_grok(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
+    let sessions = environment
+        .grok_home
+        .clone()
+        .unwrap_or_else(|| home_relative(environment, &[".grok"]))
+        .join("sessions");
+    let Ok(parents) = std::fs::read_dir(&sessions) else {
+        return Err(TranscriptFailure::Absent);
+    };
+    let mut found: Vec<PathBuf> = parents
+        .filter_map(Result::ok)
+        .filter(|parent| parent.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|parent| parent.path().join(session_id))
+        .filter(|session| std::fs::symlink_metadata(session).is_ok_and(|metadata| metadata.is_dir()))
+        .collect();
+    match found.len() {
+        0 => Err(TranscriptFailure::Absent),
+        1 => Ok(found.remove(0).join("updates.jsonl")),
         _ => Err(TranscriptFailure::Ambiguous),
     }
 }
@@ -182,12 +266,16 @@ pub struct Chunk {
 /// 視窗第一次往前讀的區塊大小;行數不夠時放大 4 倍再數(與 SSH 的視窗腳本相同)。
 const WINDOW_CHUNK_BYTES: u64 = 4 << 20;
 
+/// 沒給 `max_bytes` 時視窗最多往前讀的 bytes(#108:63 MB 的對話檔不整檔讀進記憶體)。
+pub const WINDOW_MAX_BYTES: u64 = 16 << 20;
+
 /// 以 `end` 為終點往前取恰好 `lines` 行完整的行;終點是 `end` 之前最後一個換行之後(未完成的行留給追蹤)。
 ///
 /// `max_bytes` 有值時(#52)只看 `end` 往前那麼多 bytes:區塊最多放大到上限，行數可能不夠，最後一行就比上限大時範圍是空的。
+/// 沒給 `max_bytes` 時最多往前讀 `WINDOW_MAX_BYTES`(#108),仍湊不滿 `lines` 行就回 `TooLarge`，不整檔讀。
 pub fn window(path: &Path, end: u64, lines: usize, max_bytes: Option<u64>) -> Result<Chunk, TranscriptFailure> {
     let mut file = File::open(path).map_err(|_| TranscriptFailure::Unreadable)?;
-    let limit = max_bytes.unwrap_or(u64::MAX);
+    let limit = max_bytes.unwrap_or(WINDOW_MAX_BYTES);
     let mut chunk_bytes = WINDOW_CHUNK_BYTES.min(limit);
     loop {
         let chunk_start = end.saturating_sub(chunk_bytes);
@@ -212,6 +300,9 @@ pub fn window(path: &Path, end: u64, lines: usize, max_bytes: Option<u64>) -> Re
         if line_starts.len() < lines && chunk_start > 0 && chunk_bytes < limit {
             chunk_bytes = chunk_bytes.saturating_mul(4).min(limit);
             continue;
+        }
+        if line_starts.len() < lines && chunk_start > 0 && max_bytes.is_none() {
+            return Err(TranscriptFailure::TooLarge);
         }
         let first = line_starts.len().saturating_sub(lines);
         let window_start = line_starts.get(first).copied().unwrap_or(complete_end);
@@ -625,13 +716,17 @@ impl LongLineProgress {
     }
 }
 
-fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>, TranscriptFailure> {
+/// 對話紀錄讀取累計讀進記憶體的 bytes(測試用來斷言「只讀檔尾需要的範圍」,#108)。
+pub static BYTES_READ: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>, TranscriptFailure> {
     use std::io::{Read, Seek, SeekFrom};
     file.seek(SeekFrom::Start(start)).map_err(|_| TranscriptFailure::Unreadable)?;
     let mut bytes = Vec::new();
     file.take(end.saturating_sub(start))
         .read_to_end(&mut bytes)
         .map_err(|_| TranscriptFailure::Unreadable)?;
+    BYTES_READ.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     Ok(bytes)
 }
 

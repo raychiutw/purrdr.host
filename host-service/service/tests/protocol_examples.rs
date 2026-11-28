@@ -87,6 +87,27 @@ fn decoded_examples_carry_their_values() {
     };
     assert_eq!(result.agents[0].status, AgentStatus::Idle);
     assert_eq!(result.agents[1].agent, None);
+    let tabs = result.tabs.expect("範例帶 tabs");
+    assert_eq!(tabs[0].label, "purrdr.ios");
+    assert_eq!(tabs[2].workspace_id, "w2");
+    let panes = result.panes.expect("範例帶 panes");
+    assert_eq!(panes.len(), 3);
+    assert_eq!(panes[0].agent.as_deref(), Some("claude"));
+    assert_eq!(panes[1].agent, None, "純終端機 Pane 沒有 agent");
+    assert_eq!(panes[1].agent_status, AgentStatus::Unknown);
+    let layouts = result.layouts.expect("範例帶 layouts");
+    assert_eq!(layouts[0].panes.len(), 2);
+    assert_eq!(layouts[0].splits[0].direction, "right");
+    assert_eq!(layouts[0].splits[0].ratio, 0.4);
+    assert!(layouts[1].splits.is_empty());
+
+    let slash: ServerMessage = serde_json::from_str(include_str!("../../../protocol/examples/server.slash-list-result.json")).unwrap();
+    let ServerMessage::SlashListResult(slash) = slash else {
+        panic!("不是 slash.list.result")
+    };
+    assert_eq!(slash.commands[2].plugin.as_deref(), Some("mattpocock-skills"));
+    assert_eq!(slash.commands[0].argument_hint.as_deref(), Some("<environment>"));
+    assert_eq!(slash.disabled_plugins, ["frontend-design"]);
 
     let error: ServerMessage = serde_json::from_str(include_str!("../../../protocol/examples/server.error.invalid-message.json")).unwrap();
     let ServerMessage::ErrorMessage(error) = error else { panic!("不是 error") };
@@ -143,4 +164,5 @@ fn only_write_messages_are_marked_as_write() {
     assert!(decode("client.file-upload-chunk.json").is_write());
     assert!(decode("client.devices-revoke.json").is_write());
     assert!(!decode("client.devices-list.json").is_write());
+    assert!(!decode("client.slash-list.json").is_write());
 }
