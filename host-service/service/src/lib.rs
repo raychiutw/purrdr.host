@@ -44,6 +44,7 @@ mod transcript_session;
 pub mod update;
 pub mod update_push;
 pub mod uploads;
+pub mod usage_push;
 
 mod service_main;
 mod session_history;
@@ -148,6 +149,8 @@ pub struct RunningHostService {
     upload_cleanup: Option<tokio::task::JoinHandle<()>>,
     /// Agent 觀察者的常駐 task。
     observer: Option<tokio::task::JoinHandle<()>>,
+    /// 方案用量推播的常駐 task(raychiutw/purrdr.host#98)。
+    usage_push: Option<tokio::task::JoinHandle<()>>,
     /// 直接送推播的 lease;停止時收回，外掛才會立刻接回。
     lease: Option<direct_push::Lease>,
     /// 與服務共用 serial 鎖的外掛更新器(自動更新排程用)。
@@ -179,6 +182,9 @@ impl Drop for RunningHostService {
         }
         if let Some(observer) = &self.observer {
             observer.abort();
+        }
+        if let Some(usage_push) = &self.usage_push {
+            usage_push.abort();
         }
         if let Some(lease) = &self.lease {
             lease.remove();
@@ -217,6 +223,11 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         let task = agent_observer::spawn(herdr.clone(), observer.clone(), options, config.transcripts.home.clone(), direct);
         (observer, task)
     });
+    // 方案用量推播(raychiutw/purrdr.host#98):跟觀察者一起開關(測試關掉觀察者時不讀真的用量)，需要家目錄。
+    let usage_push = config
+        .observer
+        .and(config.transcripts.home.clone())
+        .map(|home| usage_push::spawn(home, config.codex_cli.clone(), usage_push::UsagePushOptions::default()));
     let router = http::router(http::ServiceContext {
         herdr,
         observer: observer.as_ref().map(|(observer, _)| observer.clone()),
@@ -247,6 +258,7 @@ pub async fn start(config: HostServiceConfig) -> std::io::Result<RunningHostServ
         accept_loop,
         upload_cleanup,
         observer: observer.map(|(_, task)| task),
+        usage_push,
         lease,
         plugin_updater,
     })
