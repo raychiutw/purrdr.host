@@ -378,6 +378,10 @@ fn failure_message(request_id: String, failure: TranscriptFailure) -> ServerMess
         TranscriptFailure::Compressed => (ErrorCode::TranscriptCompressed, "only a compressed transcript exists"),
         TranscriptFailure::NotAllowed => (ErrorCode::TranscriptNotAllowed, "session reference is not allowed"),
         TranscriptFailure::Unsupported => (ErrorCode::TranscriptUnsupported, "host service cannot read this agent's transcript"),
+        TranscriptFailure::TooLarge => (
+            ErrorCode::TranscriptTooLarge,
+            "transcript is too large to read that many lines; pass max_bytes or ask for fewer lines",
+        ),
     };
     error(Some(request_id), code, message)
 }

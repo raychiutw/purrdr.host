@@ -1,7 +1,7 @@
 //! 對話紀錄的列表預覽與 subagent／workflow／委派讀取(raychiutw/purrdr.host#17),規則與 app 的 SSH 腳本相同。
 
 use std::fs::File;
-use std::io::{ErrorKind, Read, Seek, SeekFrom};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -9,10 +9,14 @@ use sha2::{Digest, Sha256};
 
 use crate::protocol::{TranscriptPreviewChange, TranscriptWorkflowKind};
 use crate::text_format::hex;
-use crate::transcript::{Record, TranscriptFailure, strip_images};
+use crate::transcript::{Record, TranscriptFailure, read_range, strip_images};
 
 /// 列表預覽最多讀的檔尾 bytes(同 SSH 預覽腳本的 `tail -c 48000`)。
 const PREVIEW_BYTES: u64 = 48_000;
+
+/// 檔尾 48000 bytes 裡沒有任何一行完整的一般大小的行時(最後幾行是超大的工具輸出，#108)，往前放大(每次 4 倍)
+/// 找可讀的訊息，最多讀這麼多 bytes。
+const PREVIEW_MAX_BYTES: u64 = 8 << 20;
 
 /// 版本錨點取檔尾前多少 bytes。
 const ANCHOR_BYTES: u64 = 64;
@@ -48,16 +52,77 @@ pub fn preview(path: &Path, known_version: Option<&str>) -> Result<Preview, Tran
         Some(known) => appended_from(&mut file, known, size)?,
         None => None,
     };
-    let (change, start) = match known_size {
-        Some(known_size) => (TranscriptPreviewChange::Appended, known_size),
-        None => (TranscriptPreviewChange::Whole, size.saturating_sub(PREVIEW_BYTES)),
-    };
-    let content = read_range(&mut file, start, size)?;
+    if let Some(known_size) = known_size {
+        let content = read_range(&mut file, known_size, size)?;
+        return Ok(Preview {
+            change: TranscriptPreviewChange::Appended,
+            version,
+            records: stripped_records(&content),
+        });
+    }
+    let records = whole_tail(&mut file, size)?;
     Ok(Preview {
-        change,
+        change: TranscriptPreviewChange::Whole,
         version,
-        records: stripped_records(&content),
+        records,
     })
+}
+
+/// 檔尾的預覽:先讀 48000 bytes;裡面沒有任何一行完整、不超過 48000 bytes 的行時，往前放大到有為止(上限 `PREVIEW_MAX_BYTES`,
+/// 到了還沒有回 `TooLarge`)。放大過的只回那些一般大小的完整行(總量不超過 48000 bytes),超大的行不放進預覽。
+fn whole_tail(file: &mut File, size: u64) -> Result<Vec<Record>, TranscriptFailure> {
+    let mut bytes = PREVIEW_BYTES;
+    loop {
+        let start = size.saturating_sub(bytes);
+        let content = read_range(file, start, size)?;
+        let ordinary = ordinary_lines(&content, start == 0);
+        if bytes == PREVIEW_BYTES && (start == 0 || !ordinary.is_empty()) {
+            return Ok(stripped_records(&content));
+        }
+        if !ordinary.is_empty() {
+            return Ok(newest_within_budget(&content, ordinary));
+        }
+        if start == 0 {
+            return Ok(stripped_records(&content));
+        }
+        if bytes >= PREVIEW_MAX_BYTES {
+            return Err(TranscriptFailure::TooLarge);
+        }
+        bytes = (bytes * 4).min(PREVIEW_MAX_BYTES);
+    }
+}
+
+/// 完整(前後都有換行，或從檔頭開始)且不超過 `PREVIEW_BYTES` 的行的範圍。
+fn ordinary_lines(content: &[u8], from_file_start: bool) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut line_start = 0_usize;
+    for (index, byte) in content.iter().enumerate() {
+        if *byte != b'\n' {
+            continue;
+        }
+        let complete = line_start > 0 || from_file_start;
+        if complete && index > line_start && ((index - line_start) as u64) <= PREVIEW_BYTES {
+            ranges.push(line_start..index);
+        }
+        line_start = index + 1;
+    }
+    ranges
+}
+
+/// 從最新的行往回取,累計不超過 `PREVIEW_BYTES`;依原本的順序回傳。
+fn newest_within_budget(content: &[u8], ordinary: Vec<std::ops::Range<usize>>) -> Vec<Record> {
+    let mut budget = PREVIEW_BYTES as usize;
+    let mut chosen = Vec::new();
+    for range in ordinary.into_iter().rev() {
+        let length = range.len();
+        if length > budget {
+            break;
+        }
+        budget -= length;
+        chosen.push(range);
+    }
+    chosen.reverse();
+    chosen.iter().flat_map(|range| stripped_records(&content[range.clone()])).collect()
 }
 
 /// 已知版本是這個檔案較早的樣子(錨點相同、停在行尾)且之後附加不超過 48000 bytes 時，回已知的大小。
@@ -220,13 +285,4 @@ fn open(path: &Path) -> Result<File, TranscriptFailure> {
         ErrorKind::NotFound => TranscriptFailure::Absent,
         _ => TranscriptFailure::Unreadable,
     })
-}
-
-fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>, TranscriptFailure> {
-    file.seek(SeekFrom::Start(start)).map_err(|_| TranscriptFailure::Unreadable)?;
-    let mut bytes = Vec::new();
-    file.take(end.saturating_sub(start))
-        .read_to_end(&mut bytes)
-        .map_err(|_| TranscriptFailure::Unreadable)?;
-    Ok(bytes)
 }

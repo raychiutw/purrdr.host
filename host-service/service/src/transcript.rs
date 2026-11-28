@@ -5,6 +5,7 @@
 use std::fs::File;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::herdr_socket::{Platform, SocketEnvironment};
 
@@ -50,6 +51,8 @@ pub enum TranscriptFailure {
     NotAllowed,
     /// 主機服務還不支援這種 agent。
     Unsupported,
+    /// 檔案太大：在讀取上限內湊不滿要求的範圍(#108)。
+    TooLarge,
 }
 
 /// herdr 回報的一個 Agent 裡定位對話紀錄用到的部分。
@@ -182,12 +185,16 @@ pub struct Chunk {
 /// 視窗第一次往前讀的區塊大小;行數不夠時放大 4 倍再數(與 SSH 的視窗腳本相同)。
 const WINDOW_CHUNK_BYTES: u64 = 4 << 20;
 
+/// 沒給 `max_bytes` 時視窗最多往前讀的 bytes(#108:63 MB 的對話檔不整檔讀進記憶體)。
+pub const WINDOW_MAX_BYTES: u64 = 16 << 20;
+
 /// 以 `end` 為終點往前取恰好 `lines` 行完整的行;終點是 `end` 之前最後一個換行之後(未完成的行留給追蹤)。
 ///
 /// `max_bytes` 有值時(#52)只看 `end` 往前那麼多 bytes:區塊最多放大到上限，行數可能不夠，最後一行就比上限大時範圍是空的。
+/// 沒給 `max_bytes` 時最多往前讀 `WINDOW_MAX_BYTES`(#108),仍湊不滿 `lines` 行就回 `TooLarge`，不整檔讀。
 pub fn window(path: &Path, end: u64, lines: usize, max_bytes: Option<u64>) -> Result<Chunk, TranscriptFailure> {
     let mut file = File::open(path).map_err(|_| TranscriptFailure::Unreadable)?;
-    let limit = max_bytes.unwrap_or(u64::MAX);
+    let limit = max_bytes.unwrap_or(WINDOW_MAX_BYTES);
     let mut chunk_bytes = WINDOW_CHUNK_BYTES.min(limit);
     loop {
         let chunk_start = end.saturating_sub(chunk_bytes);
@@ -212,6 +219,9 @@ pub fn window(path: &Path, end: u64, lines: usize, max_bytes: Option<u64>) -> Re
         if line_starts.len() < lines && chunk_start > 0 && chunk_bytes < limit {
             chunk_bytes = chunk_bytes.saturating_mul(4).min(limit);
             continue;
+        }
+        if line_starts.len() < lines && chunk_start > 0 && max_bytes.is_none() {
+            return Err(TranscriptFailure::TooLarge);
         }
         let first = line_starts.len().saturating_sub(lines);
         let window_start = line_starts.get(first).copied().unwrap_or(complete_end);
@@ -625,13 +635,17 @@ impl LongLineProgress {
     }
 }
 
-fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>, TranscriptFailure> {
+/// 對話紀錄讀取累計讀進記憶體的 bytes(測試用來斷言「只讀檔尾需要的範圍」,#108)。
+pub static BYTES_READ: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn read_range(file: &mut File, start: u64, end: u64) -> Result<Vec<u8>, TranscriptFailure> {
     use std::io::{Read, Seek, SeekFrom};
     file.seek(SeekFrom::Start(start)).map_err(|_| TranscriptFailure::Unreadable)?;
     let mut bytes = Vec::new();
     file.take(end.saturating_sub(start))
         .read_to_end(&mut bytes)
         .map_err(|_| TranscriptFailure::Unreadable)?;
+    BYTES_READ.fetch_add(bytes.len() as u64, Ordering::Relaxed);
     Ok(bytes)
 }
 
