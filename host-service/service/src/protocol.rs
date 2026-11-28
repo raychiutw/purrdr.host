@@ -844,6 +844,12 @@ pub struct AgentPromptResult {
     /// herdr 回報的送達方式(例如 written_to_pty);沒有時省略。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery: Option<String>,
+    /// 送出確認(raychiutw/purrdr.host#107)。herdr 只回報 written_to_pty、請求帶了 wait(prompt 路徑)、Agent 不是 codex 時，主機服務照 SSH 的規則自己等:先等 Agent 進入 working／blocked 最多 3.5 秒;沒反應就重讀狀態，只有 idle／done 才補一個 Enter(blocked 永不補;帶了 expected_session 時 session 不符也不補),再等 2.5 秒。true = Agent 已開始工作或停下來問問題(已送達);false = 仍沒反應(文字可能還在終端機裡,app 不可自動重送)。沒有這個欄位 = 主機服務沒做這段確認(舊版主機服務、不是 written_to_pty、沒帶 wait、codex),app 照原本的規則處理。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submit_confirmed: Option<bool>,
+    /// 主機服務補送了一個 Enter 時才出現(true);沒補時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enter_sent: Option<bool>,
 }
 
 /// 在主機上的資料夾建立 workspace(herdr workspace.create,不搶桌機焦點)。cwd 必須是主機上存在的絕對路徑資料夾(herdr 遇到不存在的資料夾會改開家目錄，所以主機服務先檢查)。新增聊天 = workspace.create 後對 root pane 送 agent.start。

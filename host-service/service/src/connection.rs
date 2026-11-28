@@ -54,6 +54,10 @@ pub const UNAUTHORIZED_CLOSE_CODE: u16 = 4401;
 /// 主機服務內部錯誤的 close code(RFC 6455)。
 const INTERNAL_ERROR_CLOSE_CODE: u16 = 1011;
 
+/// 送出確認:文字寫進終端機後等 Agent 反應的時間，與補 Enter 之後再等的時間(與 app 的 SSH 作法相同)。
+const CONFIRM_WAIT: Duration = Duration::from_millis(3500);
+const ENTER_WAIT: Duration = Duration::from_millis(2500);
+
 /// 送出 close 後等 app 回 close 的上限。
 const CLOSE_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -701,16 +705,86 @@ impl ClientConnection {
         }
         let mut params = json!({"target": request.pane_id, "text": request.text});
         let mut herdr_wait = Duration::ZERO;
+        let waited = request.wait.is_some();
         if let Some(wait) = request.wait {
             herdr_wait = Duration::from_millis(u64::try_from(wait.timeout_ms).unwrap_or(0));
             params["wait"] = json!({"until": wait.until, "timeout_ms": wait.timeout_ms});
         }
         match self.herdr.request_waiting("agent.prompt", params, herdr_wait).await {
-            Ok(result) => ServerMessage::AgentPromptResult(AgentPromptResult {
-                request_id: request.request_id,
-                delivery: result["delivery"].as_str().map(str::to_owned),
-            }),
+            Ok(result) => {
+                let delivery = result["delivery"].as_str().map(str::to_owned);
+                let mut reply = AgentPromptResult {
+                    request_id: request.request_id,
+                    delivery,
+                    submit_confirmed: None,
+                    enter_sent: None,
+                };
+                // 只有 prompt 路徑(帶 wait)才確認;slash／`!` 指令不帶 wait，不等也不補 Enter。
+                if waited && reply.delivery.as_deref() == Some("written_to_pty") {
+                    self.confirm_written_prompt(&request.pane_id, request.expected_session.as_deref(), &result, &mut reply)
+                        .await;
+                }
+                ServerMessage::AgentPromptResult(reply)
+            }
             Err(failure) => herdr_error(request.request_id, "agent.prompt", failure),
+        }
+    }
+
+    /// herdr 只回報文字寫進終端機時，照 SSH 的規則確認(raychiutw/purrdr.host#107):等 Agent 進入 working／blocked,
+    /// 沒反應就重讀狀態，只有 idle／done(且 session 沒換)才補一個 Enter,再等一次。Codex 沒有送達回條，不處理。
+    async fn confirm_written_prompt(&self, pane_id: &str, expected_session: Option<&str>, result: &Value, reply: &mut AgentPromptResult) {
+        let agent = &result["agent"];
+        if agent["agent"].as_str().is_none_or(|kind| kind == "codex") {
+            return;
+        }
+        match agent["agent_status"].as_str() {
+            // 原本就在工作(prompt 只會排隊)或已停下來問問題:不用等。
+            Some("working" | "blocked") => {
+                reply.submit_confirmed = Some(true);
+                return;
+            }
+            Some("idle" | "done") => {}
+            _ => return,
+        }
+        reply.submit_confirmed = Some(false);
+        match self.wait_for_reaction(pane_id, CONFIRM_WAIT).await {
+            Ok(true) => {
+                reply.submit_confirmed = Some(true);
+                return;
+            }
+            Ok(false) => {}
+            Err(_) => return,
+        }
+        let Ok(snapshot) = self.herdr.request("session.snapshot", json!({})).await else {
+            return;
+        };
+        let status = snapshot["snapshot"]["agents"]
+            .as_array()
+            .and_then(|agents| agents.iter().find(|agent| agent["pane_id"] == pane_id))
+            .and_then(|agent| agent["agent_status"].as_str());
+        let session_matches = expected_session.is_none_or(|expected| pane_guard::session_of(&snapshot, pane_id).as_deref() == Some(expected));
+        if !matches!(status, Some("idle" | "done")) || !session_matches {
+            return;
+        }
+        if self
+            .herdr
+            .request("pane.send_keys", json!({"pane_id": pane_id, "keys": ["enter"]}))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        reply.enter_sent = Some(true);
+        reply.submit_confirmed = Some(matches!(self.wait_for_reaction(pane_id, ENTER_WAIT).await, Ok(true)));
+    }
+
+    /// `agent.wait` 等 Agent 進入 working／blocked;herdr 回 `timeout` 是 `Ok(false)`。
+    async fn wait_for_reaction(&self, pane_id: &str, timeout: Duration) -> Result<bool, HerdrFailure> {
+        let params = json!({"target": pane_id, "until": ["working", "blocked"], "timeout_ms": timeout.as_millis()});
+        match self.herdr.request_waiting("agent.wait", params, timeout).await {
+            Ok(_) => Ok(true),
+            Err(HerdrFailure::Herdr { code, .. }) if code == "timeout" => Ok(false),
+            Err(failure) => Err(failure),
         }
     }
 

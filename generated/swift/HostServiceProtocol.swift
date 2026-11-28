@@ -1833,15 +1833,23 @@ extension HostServiceProtocol {
         public var requestId: String
         /// herdr 回報的送達方式(例如 written_to_pty);沒有時省略。
         public var delivery: String?
+        /// 送出確認(raychiutw/purrdr.host#107)。herdr 只回報 written_to_pty、請求帶了 wait(prompt 路徑)、Agent 不是 codex 時，主機服務照 SSH 的規則自己等:先等 Agent 進入 working／blocked 最多 3.5 秒;沒反應就重讀狀態，只有 idle／done 才補一個 Enter(blocked 永不補;帶了 expected_session 時 session 不符也不補),再等 2.5 秒。true = Agent 已開始工作或停下來問問題(已送達);false = 仍沒反應(文字可能還在終端機裡,app 不可自動重送)。沒有這個欄位 = 主機服務沒做這段確認(舊版主機服務、不是 written_to_pty、沒帶 wait、codex),app 照原本的規則處理。
+        public var submitConfirmed: Bool?
+        /// 主機服務補送了一個 Enter 時才出現(true);沒補時省略。
+        public var enterSent: Bool?
 
-        public init(requestId: String, delivery: String? = nil) {
+        public init(requestId: String, delivery: String? = nil, submitConfirmed: Bool? = nil, enterSent: Bool? = nil) {
             self.requestId = requestId
             self.delivery = delivery
+            self.submitConfirmed = submitConfirmed
+            self.enterSent = enterSent
         }
 
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
             case delivery
+            case submitConfirmed = "submit_confirmed"
+            case enterSent = "enter_sent"
         }
     }
 }
