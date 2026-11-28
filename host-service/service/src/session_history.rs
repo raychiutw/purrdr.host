@@ -37,7 +37,7 @@ pub(crate) fn list(environment: &TranscriptEnvironment, cwd: &str, kind: Resumab
 pub(crate) fn exists(environment: &TranscriptEnvironment, kind: ResumableAgentKind, id: &str) -> bool {
     match kind {
         ResumableAgentKind::Claude => transcript::locate_claude(environment, id, "").is_file(),
-        ResumableAgentKind::Codex => matches!(transcript::locate_codex(environment, id), Ok(_) | Err(TranscriptFailure::Ambiguous)),
+        ResumableAgentKind::Codex => matches!(transcript::locate_codex(environment, id, None), Ok(_) | Err(TranscriptFailure::Ambiguous)),
     }
 }
 

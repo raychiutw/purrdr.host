@@ -173,6 +173,89 @@ async fn locate_refuses_to_guess_between_codex_rollouts_and_reports_compressed_o
     assert_eq!(compressed_reply["code"], "transcript_compressed");
 }
 
+/// Codex rollout 的第一行(session_meta);cwd 是 pane 的工作目錄(snapshot_with 的 cwd)。
+fn codex_meta(cwd: &str, timestamp: &str) -> String {
+    format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{CODEX_SESSION}\",\"cwd\":\"{cwd}\",\"timestamp\":\"{timestamp}\"}}}}\n{{\"n\":2}}\n")
+}
+
+#[tokio::test]
+async fn locate_picks_the_codex_rollout_whose_header_cwd_matches_the_pane() {
+    let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
+    fixture.write(
+        &format!(".codex/sessions/2026/11/17/rollout-a-{CODEX_SESSION}.jsonl"),
+        &codex_meta("/Users/demo/Projects/other", "2026-11-17T10:00:00Z"),
+    );
+    let wanted = fixture.write(
+        &format!(".codex/archived_sessions/rollout-b-{CODEX_SESSION}_7.jsonl"),
+        &codex_meta("/Users/demo/Projects/demo", "2026-11-17T09:00:00Z"),
+    );
+
+    let reply = fixture.client().await.request(locate("r1", "id", CODEX_SESSION)).await;
+
+    assert_eq!(reply["path"], path_text(&wanted), "{reply}");
+}
+
+#[tokio::test]
+async fn locate_picks_the_newest_codex_rollout_when_cwd_cannot_tell_them_apart() {
+    let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
+    fixture.write(
+        &format!(".codex/sessions/2026/11/17/rollout-a-{CODEX_SESSION}.jsonl"),
+        &codex_meta("/Users/demo/Projects/demo", "2026-11-17T09:00:00Z"),
+    );
+    let newest = fixture.write(
+        &format!(".codex/sessions/2026/11/18/rollout-b-{CODEX_SESSION}_7.jsonl"),
+        &codex_meta("/Users/demo/Projects/demo", "2026-11-18T09:00:00Z"),
+    );
+
+    let reply = fixture.client().await.request(locate("r1", "id", CODEX_SESSION)).await;
+
+    assert_eq!(reply["path"], path_text(&newest), "{reply}");
+}
+
+#[tokio::test]
+async fn locate_stays_ambiguous_for_codex_rollouts_that_are_indistinguishable() {
+    let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
+    let same = codex_meta("/Users/demo/Projects/demo", "2026-11-17T09:00:00Z");
+    fixture.write(&format!(".codex/sessions/2026/11/17/rollout-a-{CODEX_SESSION}.jsonl"), &same);
+    fixture.write(&format!(".codex/sessions/2026/11/17/rollout-b-{CODEX_SESSION}_7.jsonl"), &same);
+
+    let reply = fixture.client().await.request(locate("r1", "id", CODEX_SESSION)).await;
+
+    assert_eq!(reply["code"], "transcript_ambiguous");
+}
+
+const GROK_SESSION: &str = "0198a1b2-0000-7000-8000-00000000g001";
+
+#[tokio::test]
+async fn locate_finds_the_grok_updates_log_of_a_session_id() {
+    let fixture = Fixture::start(snapshot_with("grok", "id", GROK_SESSION)).await;
+    let updates = fixture.write(&format!(".grok/sessions/%2FUsers%2Fdemo/{GROK_SESSION}/updates.jsonl"), "{}\n");
+
+    let reply = fixture.client().await.request(locate("r1", "id", GROK_SESSION)).await;
+
+    assert_eq!(reply["path"], path_text(&updates), "{reply}");
+}
+
+#[tokio::test]
+async fn locate_reports_grok_absent_and_ambiguous_sessions_apart_from_unsupported_agents() {
+    let absent = Fixture::start(snapshot_with("grok", "id", GROK_SESSION)).await;
+    let ambiguous = Fixture::start(snapshot_with("grok", "id", GROK_SESSION)).await;
+    ambiguous.write(&format!(".grok/sessions/a/{GROK_SESSION}/updates.jsonl"), "{}\n");
+    ambiguous.write(&format!(".grok/sessions/b/{GROK_SESSION}/updates.jsonl"), "{}\n");
+    let unsupported = Fixture::start(snapshot_with("mystery", "id", "abc")).await;
+    let path_kind = Fixture::start(snapshot_with("grok", "path", "/tmp/x.jsonl")).await;
+
+    let absent_reply = absent.client().await.request(locate("r1", "id", GROK_SESSION)).await;
+    let ambiguous_reply = ambiguous.client().await.request(locate("r1", "id", GROK_SESSION)).await;
+    let unsupported_reply = unsupported.client().await.request(locate("r1", "id", "abc")).await;
+    let path_reply = path_kind.client().await.request(locate("r1", "path", "/tmp/x.jsonl")).await;
+
+    assert_eq!(absent_reply["code"], "transcript_absent", "{absent_reply}");
+    assert_eq!(ambiguous_reply["code"], "transcript_ambiguous");
+    assert_eq!(unsupported_reply["code"], "transcript_unsupported");
+    assert_eq!(path_reply["code"], "transcript_not_allowed");
+}
+
 #[tokio::test]
 async fn locate_uses_the_path_an_antigravity_or_pi_integration_reports() {
     let home = tempfile::tempdir().unwrap();
@@ -217,7 +300,7 @@ async fn locate_rejects_unsafe_session_references_even_when_herdr_reports_them()
 
 #[tokio::test]
 async fn locate_reports_agents_whose_transcripts_the_host_service_cannot_read_yet() {
-    let fixture = Fixture::start(snapshot_with("grok", "id", "abc-1")).await;
+    let fixture = Fixture::start(snapshot_with("gemini", "id", "abc-1")).await;
 
     let reply = fixture.client().await.request(locate("r1", "id", "abc-1")).await;
 
