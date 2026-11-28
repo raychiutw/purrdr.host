@@ -1,11 +1,13 @@
 //! Agent 觀察者與 Send When Done 佇列(raychiutw/purrdr.host#30):主機服務常駐訂閱 herdr 事件，
 //! Agent 從 working 變成 idle／done 時送出佇列第一則(經 expected_session 比對),app 沒連線也照樣運作。
 
+mod install_support;
 mod support;
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use install_support::push_backend::FakePushBackend;
 use purrdr_host_service::agent_observer::ObserverOptions;
 use serde_json::{Value, json};
 use support::{FakeHerdr, TestClient, TestHostService, recorded, start_service_with_observer};
@@ -43,6 +45,32 @@ async fn observing(herdr: &FakeHerdr, state_directory: Option<PathBuf>) -> TestH
         .wait_until(|herdr| herdr.open_subscriptions() == 1 && herdr.methods().iter().any(|method| method == "session.snapshot"))
         .await;
     service
+}
+
+const PHONE_KEY: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+const WATCH_KEY: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+
+fn pair(home: &std::path::Path, device: &str, endpoint: &str, key: &str, muted: &[&str]) {
+    let directory = home.join(".purrdr").join(format!("push-{device}"));
+    std::fs::create_dir_all(&directory).unwrap();
+    let muted: String = muted.iter().map(|session| format!("muted={session}\n")).collect();
+    std::fs::write(directory.join("pairing"), format!("purrdr-push 1\nendpoint={endpoint}\nkey={key}\n{muted}")).unwrap();
+}
+
+async fn observing_with_home(herdr: &FakeHerdr, home: &std::path::Path) -> TestHostService {
+    let service = start_service_with_observer(herdr.socket.clone(), None, Some(home.to_owned()), options()).await;
+    herdr
+        .wait_until(|herdr| herdr.open_subscriptions() == 1 && herdr.methods().iter().any(|method| method == "session.snapshot"))
+        .await;
+    service
+}
+
+async fn wait_for_pushes(backend: &FakePushBackend, count: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while backend.bodies().len() < count {
+        assert!(tokio::time::Instant::now() < deadline, "等不到推播:{:?}", backend.bodies());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 async fn connect(service: &TestHostService) -> TestClient {
@@ -150,7 +178,10 @@ async fn nothing_is_sent_while_the_agent_needs_you() {
 #[tokio::test]
 async fn a_different_session_pauses_the_queue_without_sending() {
     let herdr = herdr().await;
-    let service = observing(&herdr, None).await;
+    let home = tempfile::TempDir::new().unwrap();
+    let backend = FakePushBackend::start();
+    pair(home.path(), "phone", &backend.endpoint(), PHONE_KEY, &[]);
+    let service = observing_with_home(&herdr, home.path()).await;
     let mut client = connect(&service).await;
     let item = add(&mut client, "w1:pA", "for the old chat", "00000000-0000-0000-0000-0000000000ff").await;
 
@@ -165,8 +196,49 @@ async fn a_different_session_pauses_the_queue_without_sending() {
         listed["queues"],
         json!([{"pane_id": "w1:pA", "paused": "session_changed", "items": [{"item_id": item, "text": "for the old chat", "expected_session": "00000000-0000-0000-0000-0000000000ff"}]}])
     );
+    wait_for_pushes(&backend, 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let bodies = backend.bodies();
+    assert_eq!(bodies.len(), 1, "{bodies:?}");
+    assert_eq!(bodies[0]["key"], PHONE_KEY);
+    assert_eq!(bodies[0]["status"], "queue_paused");
+    assert_eq!(bodies[0]["pane"], "w1:pA");
+    assert_eq!(bodies[0]["workspace"], bodies[0]["workspace"].as_str().unwrap());
+    assert!(bodies[0].get("tab").is_some(), "{bodies:?}");
 }
 
+#[tokio::test]
+async fn pausing_pushes_once_per_pause_skips_muted_devices_and_pushes_again_after_resuming() {
+    let herdr = herdr().await;
+    let home = tempfile::TempDir::new().unwrap();
+    let backend = FakePushBackend::start();
+    pair(home.path(), "phone", &backend.endpoint(), PHONE_KEY, &[]);
+    pair(home.path(), "watch", &backend.endpoint(), WATCH_KEY, &[PA_SESSION]);
+    let service = observing_with_home(&herdr, home.path()).await;
+    let mut client = connect(&service).await;
+    let stale = add(&mut client, "w1:pA", "for the old chat", "00000000-0000-0000-0000-0000000000ff").await;
+    herdr.push_event(status("w1:pA", "idle"));
+    change_where(&mut client, |change| change["queue"].get("paused").is_some()).await;
+    wait_for_pushes(&backend, 1).await;
+
+    // 暫停期間再變成 working/idle:仍是同一次暫停，不再送。
+    herdr.push_event(status("w1:pA", "working"));
+    herdr.push_event(status("w1:pA", "idle"));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(backend.bodies().len(), 1, "{:?}", backend.bodies());
+    assert_eq!(backend.bodies()[0]["key"], PHONE_KEY, "靜音該聊天的裝置不送");
+
+    // 移除舊項目恢復後再暫停:可以再送。
+    request(
+        &mut client,
+        json!({"type": "queue.remove", "request_id": "r4", "pane_id": "w1:pA", "item_id": stale}),
+    )
+    .await;
+    add(&mut client, "w1:pA", "for another old chat", "00000000-0000-0000-0000-0000000000fe").await;
+    herdr.push_event(status("w1:pA", "working"));
+    herdr.push_event(status("w1:pA", "idle"));
+    wait_for_pushes(&backend, 2).await;
+}
 #[tokio::test]
 async fn queues_have_limits_and_only_known_items_can_be_changed() {
     let herdr = herdr().await;
@@ -345,4 +417,37 @@ async fn an_agent_that_finished_while_herdr_was_disconnected_still_gets_its_prom
 
     herdr.wait_until(|herdr| prompts(herdr).len() == 1).await;
     assert_eq!(prompts(&herdr)[0], json!({"target": "w1:pA", "text": "after reconnecting"}));
+}
+
+#[tokio::test]
+async fn a_slow_queue_paused_push_does_not_block_the_next_pane() {
+    // session.snapshot 每次要 1 秒:暫停推播要先抓 snapshot,若在事件迴圈裡等,下一個 pane 的送出會被拖慢。
+    let herdr = FakeHerdr::start_delayed(vec![
+        ("ping", recorded("ping.ndjson"), Duration::ZERO),
+        ("session.snapshot", recorded("session.snapshot.ndjson"), Duration::from_secs(1)),
+        ("events.subscribe", recorded("events.subscribe.started.ndjson"), Duration::ZERO),
+        ("agent.prompt", recorded("agent.prompt.ndjson"), Duration::ZERO),
+    ])
+    .await;
+    let home = tempfile::TempDir::new().unwrap();
+    let backend = FakePushBackend::start();
+    pair(home.path(), "phone", &backend.endpoint(), PHONE_KEY, &[]);
+    let service = observing_with_home(&herdr, home.path()).await;
+    // 等啟動時的對帳(snapshot 各 1 秒)做完,免得干擾計時。
+    tokio::time::sleep(Duration::from_millis(4000)).await;
+    let mut client = connect(&service).await;
+    add(&mut client, "w1:pA", "for the old chat", "00000000-0000-0000-0000-0000000000ff").await;
+    add(&mut client, "w1:pB", "marker", PB_SESSION).await;
+
+    let started = tokio::time::Instant::now();
+    herdr.push_event(status("w1:pA", "idle"));
+    herdr.push_event(status("w1:pB", "idle"));
+    herdr.wait_until(|herdr| !prompts(herdr).is_empty()).await;
+
+    // pA 的 guard 1 秒 + pB 的 guard 1 秒 ≈ 2 秒;推播若卡在迴圈裡會再多 1 秒(下限 3 秒)。
+    assert!(
+        started.elapsed() < Duration::from_millis(2600),
+        "pB 被 queue_paused 推播拖慢:{:?}",
+        started.elapsed()
+    );
 }
