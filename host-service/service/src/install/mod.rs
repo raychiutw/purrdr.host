@@ -86,6 +86,8 @@ pub struct HostStatus {
     pub auto_update: Option<bool>,
     /// 主機服務的 log 資料夾(`host-service.log`、`update.log` 都在這裡)。
     pub log_directory: PathBuf,
+    /// `running.json` 記載的程序已不存在(服務沒有正常關閉就消失了)時的上次執行。
+    pub vanished_run: Option<crate::running_service::RunningService>,
 }
 
 impl std::fmt::Display for HostStatus {
@@ -97,6 +99,13 @@ impl std::fmt::Display for HostStatus {
         }
         writeln!(formatter, "  logs: {}", self.log_directory.display())?;
         writeln!(formatter, "  listening on 127.0.0.1:{}: {}", self.port, yes_no(self.listening))?;
+        if let Some(run) = &self.vanished_run {
+            writeln!(
+                formatter,
+                "  last run: process is gone, not shut down cleanly ({})",
+                crate::shutdown::describe_run(run)
+            )?;
+        }
         if let Some(address) = &self.https_address {
             writeln!(formatter, "  HTTPS address: {address}")?;
         }
@@ -1149,11 +1158,12 @@ impl<S: HostSystem> Installer<S> {
                 Err(error) => ServeStatus::Unavailable(error.to_string()),
             };
         let session = record.as_ref().and_then(|record| record.herdr_session.clone());
+        let listening = is_listening(port).await;
         let auto_update_setting = record.as_ref().map(|record| record.auto_update);
         HostStatus {
             installed: record.is_some(),
             autostart_registered: autostart::is_registered(&mut self.system, &layout),
-            listening: is_listening(port).await,
+            listening,
             port,
             https_port,
             https_address: record.map(|record| record.https_address),
@@ -1161,6 +1171,11 @@ impl<S: HostSystem> Installer<S> {
             herdr: herdr_status(self.environment.platform, session.as_deref(), socket_environment).await,
             auto_update: auto_update_setting,
             log_directory: layout.directory().join("logs"),
+            vanished_run: if listening {
+                None
+            } else {
+                crate::shutdown::vanished_previous_run(&layout.directory(), std::process::id(), &crate::shutdown::SystemProcesses)
+            },
         }
     }
 

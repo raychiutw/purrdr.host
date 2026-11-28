@@ -33,6 +33,11 @@ pub fn read(state_directory: &Path) -> Option<RunningService> {
     serde_json::from_str(&std::fs::read_to_string(state_directory.join(FILE_NAME)).ok()?).ok()
 }
 
+/// 刪掉 `running.json`(正常關閉、或已回報過消失的上次執行);沒有檔案不算錯。
+pub fn remove(state_directory: &Path) {
+    let _ = std::fs::remove_file(state_directory.join(FILE_NAME));
+}
+
 pub fn unix_millis(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
