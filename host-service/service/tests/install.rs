@@ -145,6 +145,31 @@ fn windows_stopping_the_service_clears_running_json_so_the_restart_is_not_report
 }
 
 #[test]
+fn windows_stops_ask_the_watchdog_not_to_restart_and_start_clears_the_request() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    let marker = host.service_directory().join("stop-requested");
+
+    // 重新安裝:先要求看門狗別重啟再 taskkill,啟動新的之後標記清掉(否則新看門狗一出生就被要求停止)。
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    assert_eq!(
+        installer.system().stop_marker_at_taskkill,
+        vec![true],
+        "重新安裝停掉舊服務的 taskkill 當下標記已存在"
+    );
+    assert!(!marker.exists(), "重新安裝啟動新服務後標記要清掉");
+
+    // uninstall:先取消登記(刪 Run 值)再停服務,停止當下標記已存在。
+    installer.uninstall().unwrap();
+    let commands = &installer.system().commands;
+    let delete = commands.iter().rposition(|command| command.starts_with("reg delete")).unwrap();
+    let kill = commands.iter().rposition(|command| command.starts_with("taskkill")).unwrap();
+    assert!(delete < kill, "uninstall 要先取消登記再停服務:{commands:?}");
+    assert_eq!(installer.system().stop_marker_at_taskkill.last(), Some(&true));
+}
+
+#[test]
 fn windows_uninstall_from_installed_copy_removes_files_after_it_exits() {
     let host = TestHost::new(InstallPlatform::Windows);
     let home_before = snapshot(&host.home.0);

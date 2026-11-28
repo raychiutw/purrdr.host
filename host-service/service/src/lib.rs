@@ -40,6 +40,7 @@ pub mod shutdown;
 mod slash_list;
 pub mod state_directory;
 mod structure_operations;
+pub mod supervisor;
 mod text_format;
 pub mod transcript;
 pub mod transcript_reads;

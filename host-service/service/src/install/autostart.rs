@@ -66,6 +66,8 @@ pub(super) fn register(system: &mut impl HostSystem, layout: &ServiceLayout, ser
                 .join(" ");
             let add = [RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &run_command, "/f"];
             run_checked(system, "reg", &std::iter::once("add").chain(add).map(str::to_owned).collect::<Vec<_>>())?;
+            // 舊程序已由安裝流程停掉:清掉停止要求,新的看門狗才會正常運作。
+            crate::supervisor::clear_stop(&layout.directory());
             system
                 .spawn_detached(&background, service_arguments)
                 .map_err(|error| InstallError::Autostart(format!("cannot start {background}: {error}")))
@@ -88,6 +90,7 @@ pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, serv
         InstallPlatform::Linux => run_checked(system, "systemctl", &arguments(&["--user", "restart", SYSTEMD_UNIT])),
         InstallPlatform::Windows => {
             stop_windows_background(system, layout, user_name);
+            crate::supervisor::clear_stop(&layout.directory());
             let background = layout.background_executable().display().to_string();
             system
                 .spawn_detached(&background, service_arguments)
@@ -96,8 +99,10 @@ pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, serv
     }
 }
 
-/// 只結束這個使用者的背景執行檔。
+/// 只結束這個使用者的背景執行檔(看門狗與它的子程序同映像名,一起結束)。
+/// 先留下停止要求,看門狗才不會在兩者被結束的空窗把服務重啟起來(#112);要再啟動時由呼叫端清掉。
 fn stop_windows_background(system: &mut impl HostSystem, layout: &ServiceLayout, user_name: Option<&str>) {
+    crate::supervisor::request_stop(&layout.directory());
     let mut taskkill = arguments(&["/F", "/IM", layout.background_executable_name()]);
     if let Some(user_name) = user_name {
         taskkill.extend(["/FI".to_owned(), format!("USERNAME eq {user_name}")]);
@@ -121,8 +126,9 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
             let _ = system.run("systemctl", &arguments(&["--user", "disable", "--now", SYSTEMD_UNIT]));
         }
         InstallPlatform::Windows => {
-            stop_windows_background(system, layout, user_name);
+            // 先取消登記再停服務:停的當下不會有人(登入、看門狗)把它再帶起來。
             let _ = system.run("reg", &arguments(&["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
+            stop_windows_background(system, layout, user_name);
         }
     }
     if let Some(file) = registration_file(layout) {
@@ -146,6 +152,11 @@ fn wait_until_unloaded(system: &mut impl HostSystem, job: &str) {
             std::thread::sleep(UNLOAD_POLL_INTERVAL);
         }
     }
+}
+
+/// 看門狗說明:只有 Windows 的背景執行檔有(macOS launchd、Linux systemd 由系統重啟)。
+pub(super) fn auto_restart_note(layout: &ServiceLayout) -> Option<&'static str> {
+    (layout.platform == InstallPlatform::Windows).then_some("watchdog (restarts the service if it disappears)")
 }
 
 /// 系統是否登記了自動啟動。
