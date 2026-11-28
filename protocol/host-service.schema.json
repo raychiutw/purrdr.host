@@ -201,15 +201,33 @@
       "required": ["type", "request_id"]
     },
     "AgentsListResult": {
-      "description": "Agent 列表與它們所在的 workspace。",
+      "description": "Agent 列表與它們所在的 workspace、Tab(0.17.0 起帶 tabs)。",
       "type": "object",
       "properties": {
         "type": { "const": "agents.list.result" },
         "request_id": { "type": "string" },
         "workspaces": { "type": "array", "items": { "$ref": "#/$defs/Workspace" } },
+        "tabs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Tab" },
+          "description": "herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。"
+        },
         "agents": { "type": "array", "items": { "$ref": "#/$defs/Agent" } }
       },
       "required": ["type", "request_id", "workspaces", "agents"]
+    },
+    "Tab": {
+      "description": "herdr 的 Tab。",
+      "type": "object",
+      "properties": {
+        "tab_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "label": {
+          "type": "string",
+          "description": "Tab 名稱,照 herdr 原樣。沒命名的 Tab herdr 會給順序號(例如 \"1\");herdr 完全沒給名稱時為空字串。"
+        }
+      },
+      "required": ["tab_id", "workspace_id", "label"]
     },
     "Workspace": {
       "type": "object",

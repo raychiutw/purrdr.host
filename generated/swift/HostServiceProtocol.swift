@@ -754,22 +754,48 @@ extension HostServiceProtocol {
 }
 
 extension HostServiceProtocol {
-    /// Agent 列表與它們所在的 workspace。
+    /// Agent 列表與它們所在的 workspace、Tab(0.17.0 起帶 tabs)。
     public struct AgentsListResult: Codable, Sendable, Equatable {
         public var requestId: String
         public var workspaces: [Workspace]
+        /// herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。
+        public var tabs: [Tab]?
         public var agents: [Agent]
 
-        public init(requestId: String, workspaces: [Workspace], agents: [Agent]) {
+        public init(requestId: String, workspaces: [Workspace], tabs: [Tab]? = nil, agents: [Agent]) {
             self.requestId = requestId
             self.workspaces = workspaces
+            self.tabs = tabs
             self.agents = agents
         }
 
         private enum CodingKeys: String, CodingKey {
             case requestId = "request_id"
             case workspaces
+            case tabs
             case agents
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// herdr 的 Tab。
+    public struct Tab: Codable, Sendable, Equatable {
+        public var tabId: String
+        public var workspaceId: String
+        /// Tab 名稱,照 herdr 原樣。沒命名的 Tab herdr 會給順序號(例如 "1");herdr 完全沒給名稱時為空字串。
+        public var label: String
+
+        public init(tabId: String, workspaceId: String, label: String) {
+            self.tabId = tabId
+            self.workspaceId = workspaceId
+            self.label = label
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case tabId = "tab_id"
+            case workspaceId = "workspace_id"
+            case label
         }
     }
 }

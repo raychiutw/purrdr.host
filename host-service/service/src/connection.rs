@@ -36,7 +36,7 @@ use crate::protocol::{
     FileStat, FileStatResult, FileStatus, FileUploadChunk, FileUploadChunkResult, FileUploadStart, FileUploadStartResult, GitDiff, GitDiffResult, GitStatus,
     GitStatusResult, HerdrServer, PROTOCOL_VERSION, PairedDevice, PaneSendKeys, PaneSendKeysResult, PaneSendText, PaneSendTextResult, PaneTerminalOpen,
     PaneTerminalOpenResult, PushTestResult, QueueAdd, QueueAddResult, QueueList, QueueListResult, QueueRemove, QueueRemoveResult, QueueReorder,
-    QueueReorderResult, ServerMessage, SessionsList, SessionsListResult, SubscribedEvent, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate,
+    QueueReorderResult, ServerMessage, SessionsList, SessionsListResult, SubscribedEvent, Tab, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate,
     UsageCodexResult, Welcome, Workspace,
 };
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
@@ -1109,7 +1109,19 @@ struct HerdrSnapshot {
     #[serde(default, deserialize_with = "lenient_list")]
     workspaces: Vec<HerdrWorkspace>,
     #[serde(default, deserialize_with = "lenient_list")]
+    tabs: Vec<HerdrTab>,
+    #[serde(default, deserialize_with = "lenient_list")]
     agents: Vec<HerdrAgent>,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrTab {
+    #[serde(default, deserialize_with = "lenient_value")]
+    tab_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    workspace_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    label: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1164,6 +1176,15 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
             label: workspace.label,
         })
         .collect();
+    let tabs = snapshot
+        .tabs
+        .into_iter()
+        .map(|tab| Tab {
+            tab_id: tab.tab_id,
+            workspace_id: tab.workspace_id,
+            label: tab.label,
+        })
+        .collect();
     let agents = snapshot
         .agents
         .into_iter()
@@ -1181,6 +1202,7 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
     AgentsListResult {
         request_id,
         workspaces,
+        tabs: Some(tabs),
         agents,
     }
 }

@@ -313,12 +313,24 @@ pub struct AgentsList {
     pub request_id: String,
 }
 
-/// Agent 列表與它們所在的 workspace。
+/// Agent 列表與它們所在的 workspace、Tab(0.17.0 起帶 tabs)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentsListResult {
     pub request_id: String,
     pub workspaces: Vec<Workspace>,
+    /// herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tabs: Option<Vec<Tab>>,
     pub agents: Vec<Agent>,
+}
+
+/// herdr 的 Tab。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Tab {
+    pub tab_id: String,
+    pub workspace_id: String,
+    /// Tab 名稱,照 herdr 原樣。沒命名的 Tab herdr 會給順序號(例如 "1");herdr 完全沒給名稱時為空字串。
+    pub label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

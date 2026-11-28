@@ -87,6 +87,9 @@ fn decoded_examples_carry_their_values() {
     };
     assert_eq!(result.agents[0].status, AgentStatus::Idle);
     assert_eq!(result.agents[1].agent, None);
+    let tabs = result.tabs.expect("範例帶 tabs");
+    assert_eq!(tabs[0].label, "purrdr.ios");
+    assert_eq!(tabs[2].workspace_id, "w2");
 
     let error: ServerMessage = serde_json::from_str(include_str!("../../../protocol/examples/server.error.invalid-message.json")).unwrap();
     let ServerMessage::ErrorMessage(error) = error else { panic!("不是 error") };
