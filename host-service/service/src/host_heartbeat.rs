@@ -155,37 +155,68 @@ fn heartbeat_url(endpoint: &str) -> Option<String> {
 }
 
 /// 一直依排程送心跳(不會結束);`signals` 是睡眠通知來源,沒有(或來源結束)就只靠週期。
-pub async fn run<T: HeartbeatTransport + 'static>(
+///
+/// 心跳是阻塞的 HTTP(每組配對最久 10 秒),macOS 的睡眠 callback 卻只等 5 秒就放行睡眠:
+/// 進行中的心跳不能擋住睡眠回報,所以收到 `WillSleep` 時另用複製的 transport 立刻送 `sleeping`。
+pub async fn run<T: HeartbeatTransport + Clone + 'static>(
     home: PathBuf,
     transport: T,
     schedule: Schedule,
     mut signals: Option<tokio::sync::mpsc::UnboundedReceiver<SleepSignal>>,
 ) {
-    let mut heartbeat = HostHeartbeat::new(&home, transport, schedule.recheck);
+    let mut heartbeat = HostHeartbeat::new(&home, transport.clone(), schedule.recheck);
     let mut ticker = tokio::time::interval(schedule.interval);
     // 睡眠回來後不補送錯過的週期。
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // 心跳進行中收到、但不用立刻處理的通知(醒來),等這次心跳結束再處理。
+    let mut pending = std::collections::VecDeque::new();
     loop {
-        let (state, ack) = tokio::select! {
-            _ = ticker.tick() => (HostState::Online, None),
-            signal = next_signal(&mut signals) => match signal {
-                Some(SleepSignal::WillSleep(ack)) => (HostState::Sleeping, Some(ack)),
-                Some(SleepSignal::DidWake) => {
-                    ticker.reset();
-                    (HostState::Online, None)
-                }
-                None => {
-                    signals = None;
-                    continue;
-                }
+        let signal = match pending.pop_front() {
+            Some(signal) => Some(signal),
+            None => tokio::select! {
+                _ = ticker.tick() => None,
+                signal = next_signal(&mut signals) => match signal {
+                    Some(signal) => Some(signal),
+                    None => {
+                        signals = None;
+                        continue;
+                    }
+                },
             },
         };
+        let (state, ack) = match signal {
+            None => (HostState::Online, None),
+            Some(SleepSignal::WillSleep(ack)) => (HostState::Sleeping, Some(ack)),
+            Some(SleepSignal::DidWake) => {
+                ticker.reset();
+                (HostState::Online, None)
+            }
+        };
         // 傳輸是阻塞的 HTTP(最久 10 秒逾時),放到阻塞執行緒池。
-        let beaten = tokio::task::spawn_blocking(move || {
+        let mut beat = tokio::task::spawn_blocking(move || {
             heartbeat.beat(state, Instant::now());
             heartbeat
-        })
-        .await;
+        });
+        let beaten = loop {
+            tokio::select! {
+                beaten = &mut beat => break beaten,
+                signal = next_signal(&mut signals) => match signal {
+                    Some(SleepSignal::WillSleep(sleep_ack)) if state != HostState::Sleeping => {
+                        // 用全新的狀態機(不知道哪些配對說過不需要,會多問一次,無害)。
+                        let (home, transport, recheck) = (home.clone(), transport.clone(), schedule.recheck);
+                        let _ = tokio::task::spawn_blocking(move || {
+                            HostHeartbeat::new(&home, transport, recheck).beat(HostState::Sleeping, Instant::now());
+                        })
+                        .await;
+                        sleep_ack.done();
+                    }
+                    // 這次本來就是睡眠回報:睡眠通知重複,直接回條。
+                    Some(SleepSignal::WillSleep(sleep_ack)) => sleep_ack.done(),
+                    Some(signal) => pending.push_back(signal),
+                    None => signals = None,
+                },
+            }
+        };
         if let Some(ack) = ack {
             ack.done();
         }
