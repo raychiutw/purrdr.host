@@ -20,12 +20,85 @@
 # 任何一項無法確認(沒有 lease、過期、壞掉、沒有 HERDR_SOCKET_PATH、socket 不同)都照送:寧可重複也不漏推。
 # 假設(尚未在真的 herdr 上逐字驗證):herdr 注入的 HERDR_SOCKET_PATH 與主機服務解析出的路徑指向同一個 socket 檔;
 # 兩邊都先把資料夾正規化(pwd -P)再比，所以符號連結與 .. 的寫法差異不影響。
+#
+# 0.3.0 起(raychiutw/purrdr.host#96、#98):
+# - 完成帶 `workSeconds`(工作秒數)。外掛沒有常駐程序，herdr 事件也沒有時間戳、順序不保證，所以每個 pane 進入 working 時
+#   把開始時間(Unix 秒)寫到 ~/.purrdr/plugin-state/work-<pane>(不以 `push-` 開頭，不會被當成配對資料夾),done 時讀出、算秒數並刪掉。
+#   算不出來一律省略欄位(不帶 0):沒有開始時間(重啟後、done 先於 working)、重複 working(順序不可信，這一段作廢)、
+#   時間倒退、檔案壞掉、開始時間超過 24 小時前(殘留)。blocked 結束一段工作(使用者介入),之後再 working 是新的一段。
+#   working 與其他狀態(idle…)本身不推播。
+# - 方案用量:每次狀態改變都讀 Claude 的 status line 用量檔 ~/.purrdr/claude-usage/usage.json(five_hour、seven_day 兩個視窗),
+#   used_percentage 跨過 80／95 就各送一則 `{"status":"usage","agent":"claude","threshold":N,"resetsAt":<Unix 秒>}`(不帶 workspace、pane、tab)。
+#   沒有用量檔或沒有 resets_at(或已過期)就不送;後台以 (agent,resetsAt,threshold) 去重,外掛另在 ~/.purrdr/plugin-state/usage-sent
+#   記「該週期該門檻已送過」(每行 `<resetsAt>:<門檻>`,週期過了就清掉),至少一支裝置收到(2xx)才記。
+# - 主機服務同版本會自己送這兩項，所以 lease 新鮮時 usage 與 workSeconds 也讓位(整個事件不送);但開始時間照記、done 照清。
 
 status=$(printf '%s' "${HERDR_PLUGIN_EVENT_JSON:-}" | sed -nE 's/.*"agent_status":"([a-z_]*)".*/\1/p')
-case $status in
-  blocked | done) ;;
-  *) exit 0 ;;
+
+# 取出 JSON 字串欄位的值，維持 JSON 的跳脫(原樣放回請求的 JSON 裡)。
+json_string() {
+  printf '%s' "$1" | sed -nE 's/.*"'"$2"'":"(([^"\\]|\\.)*)".*/\1/p' | head -n 1
+}
+
+pane=$(json_string "${HERDR_PLUGIN_EVENT_JSON:-}" pane_id)
+case $pane in
+  '' | *[!A-Za-z0-9:_.-]*) pane= ;;
 esac
+
+state_dir="$HOME/.purrdr/plugin-state"
+
+# 原子寫入狀態檔:$1 檔案，$2 內容。失敗略過(狀態只是輔助，不影響推播)。
+write_state() {
+  mkdir -p "$state_dir" 2>/dev/null || return 0
+  _tmp="$1.$$"
+  if printf '%s\n' "$2" > "$_tmp" 2>/dev/null; then
+    mv -f "$_tmp" "$1" 2>/dev/null || rm -f "$_tmp"
+  else
+    rm -f "$_tmp"
+  fi
+}
+
+# 讀 `working_since=` 的值:只接受不帶前導零的 1–12 位數字(其餘當作壞掉，也避免被當成八進位算術)。
+read_work_start() {
+  _since=$(sed -n 's/^working_since=//p' "$1" 2>/dev/null | head -n 1)
+  case $_since in
+    '' | 0[0-9]* | *[!0-9]*) return 1 ;;
+  esac
+  [ "${#_since}" -le 12 ] || return 1
+  printf '%s' "$_since"
+}
+
+# 每個 pane 的工作開始時間(見檔頭說明)。done 時算出的秒數放 work_seconds(算不出來留空)。
+work_seconds=
+track_work() {
+  [ -n "$pane" ] || return 0
+  _file="$state_dir/work-$(printf '%s' "$pane" | tr ':' '_')"
+  _now=$(date +%s)
+  case $status in
+    working)
+      _stale=
+      if [ -f "$_file" ] && _since=$(read_work_start "$_file") && [ "$((_now - _since))" -gt 86400 ]; then _stale=1; fi
+      if [ -f "$_file" ] && [ -z "$_stale" ]; then
+        # 上一段還沒結束又收到 working(重複或亂序):這一段的開始時間不可信，作廢(留到 done 或 blocked 才清)。
+        write_state "$_file" 'working_since=invalid'
+      else
+        write_state "$_file" "working_since=$_now"
+      fi
+      ;;
+    done)
+      if [ -f "$_file" ]; then
+        if _since=$(read_work_start "$_file"); then
+          _elapsed=$((_now - _since))
+          if [ "$_elapsed" -ge 0 ] && [ "$_elapsed" -le 86400 ]; then work_seconds=$_elapsed; fi
+        fi
+        rm -f "$_file"
+      fi
+      ;;
+    *) rm -f "$_file" ;;
+  esac
+}
+
+track_work
 
 # 路徑正規化:資料夾解析符號連結與 ..,檔名照舊(與主機服務寫 lease 時的算法相同)。
 canonical_path() {
@@ -50,15 +123,73 @@ host_service_is_sending() {
 
 host_service_is_sending && exit 0
 
-# 取出 JSON 字串欄位的值，維持 JSON 的跳脫(原樣放回請求的 JSON 裡)。
-json_string() {
-  printf '%s' "$1" | sed -nE 's/.*"'"$2"'":"(([^"\\]|\\.)*)".*/\1/p' | head -n 1
+# 對一支配對裝置送一則請求(密鑰經 stdin):$1 pairing 檔，$2 密鑰，$3 endpoint，$4 請求本文(key 之後的欄位，不含大括號)。
+# 狀態碼放 push_code。後台回 410(裝置已被遠端關閉、配對撤銷)就刪掉那支裝置的配對資料夾;送出期間重新配對了(密鑰換了)就不刪。
+post_push() {
+  push_code=$(printf '{"key":"%s",%s}' "$2" "$4" |
+    curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json' \
+      --data-binary @- "$3") || true
+  if [ "$push_code" = "410" ] && [ "$(sed -n 's/^key=//p' "$1" | head -n 1)" = "$2" ]; then
+    rm -rf "${1%/pairing}"
+  fi
 }
 
-pane=$(json_string "${HERDR_PLUGIN_EVENT_JSON:-}" pane_id)
-case $pane in
-  '' | *[!A-Za-z0-9:_.-]*) pane= ;;
+# 方案用量(#98):從 Claude 的用量檔挑出跨過 80／95 且這個週期還沒送過的門檻，逐一送給每支配對裝置。
+# 用量檔的格式見 claude-usage/statusline.sh(`status_line_input.rate_limits.{five_hour,seven_day}.{used_percentage,resets_at}`)。
+check_usage() {
+  _usage_file="$HOME/.purrdr/claude-usage/usage.json"
+  [ -f "$_usage_file" ] || return 0
+  _json=$(head -c 1048576 "$_usage_file" 2>/dev/null | tr -d '\r\n')
+  _now=$(date +%s)
+  _sent_file="$state_dir/usage-sent"
+  _pending=
+  for _period in five_hour seven_day; do
+    _block=$(printf '%s' "$_json" | sed -nE 's/.*"'"$_period"'"[[:space:]]*:[[:space:]]*\{([^}]*)\}.*/\1/p')
+    # 只取整數部分(比例 85.5 視為 85,門檻是整數所以結果相同;重置時間的小數秒捨去)。
+    _used=$(printf '%s' "$_block" | sed -nE 's/.*"used_percentage"[[:space:]]*:[[:space:]]*([0-9]{1,3})([^0-9].*)?$/\1/p')
+    _resets=$(printf '%s' "$_block" | sed -nE 's/.*"resets_at"[[:space:]]*:[[:space:]]*([0-9]{1,12})([^0-9].*)?$/\1/p')
+    [ -n "$_used" ] && [ -n "$_resets" ] || continue
+    # 已過重置時間:那個視窗已經重置，檔案裡的比例過時了。
+    [ "$_resets" -gt "$_now" ] || continue
+    for _threshold in 80 95; do
+      [ "$_used" -ge "$_threshold" ] || continue
+      if [ -f "$_sent_file" ] && grep -qxF "$_resets:$_threshold" "$_sent_file"; then continue; fi
+      _pending="$_pending $_resets:$_threshold"
+    done
+  done
+  # 已過期週期的紀錄清掉。
+  if [ -s "$_sent_file" ]; then
+    _kept=$(awk -F: -v now="$_now" '$1 ~ /^[0-9]+$/ && $1 + 0 > now + 0' "$_sent_file")
+    if [ "$_kept" != "$(cat "$_sent_file")" ]; then write_state "$_sent_file" "$_kept"; fi
+  fi
+  [ -n "$_pending" ] || return 0
+  _delivered=
+  for _file in "$HOME"/.purrdr/push-*/pairing; do
+    [ -f "$_file" ] || continue
+    _key=$(sed -n 's/^key=//p' "$_file" | head -n 1)
+    _endpoint=$(sed -n 's/^endpoint=//p' "$_file" | head -n 1)
+    [ -n "$_key" ] && [ -n "$_endpoint" ] || continue
+    for _item in $_pending; do
+      post_push "$_file" "$_key" "$_endpoint" '"status":"usage","agent":"claude","threshold":'"${_item#*:}"',"resetsAt":'"${_item%:*}"
+      case $push_code in 2*) _delivered="$_delivered $_item" ;; esac
+      [ "$push_code" != "410" ] || break
+    done
+  done
+  for _item in $_delivered; do
+    grep -qxF "$_item" "$_sent_file" 2>/dev/null && continue
+    mkdir -p "$state_dir" 2>/dev/null
+    printf '%s\n' "$_item" >> "$_sent_file" 2>/dev/null
+  done
+}
+
+check_usage
+
+# 往下是 blocked／done 的推播;其他狀態(working、idle…)到此為止。
+case $status in
+  blocked | done) ;;
+  *) exit 0 ;;
 esac
+
 workspace=$(json_string "${HERDR_PLUGIN_CONTEXT_JSON:-}" workspace_label)
 [ -n "$workspace" ] || workspace=$(json_string "${HERDR_PLUGIN_EVENT_JSON:-}" workspace_id)
 [ -n "$workspace" ] || exit 0
@@ -68,6 +199,8 @@ if [ -n "$pane" ]; then
 else
   extra=
 fi
+# 完成才帶工作秒數(算不出來就省略)。
+if [ "$status" = done ] && [ -n "$work_seconds" ]; then extra="$extra"',"workSeconds":'"$work_seconds"; fi
 
 session=
 tab=
@@ -130,11 +263,5 @@ for file in "$HOME"/.purrdr/push-*/pairing; do
   if [ -n "$session" ] && grep -qxF "muted=$session" "$file"; then
     continue
   fi
-  code=$(printf '{"key":"%s","workspace":"%s","status":"%s"%s%s}' "$key" "$workspace" "$status" "$extra" "$tab_field" |
-    curl -sS -o /dev/null -w '%{http_code}' --max-time 10 -X POST -H 'content-type: application/json' \
-      --data-binary @- "$endpoint") || true
-  # 送出期間重新配對了(密鑰換了)就不是被撤銷的那一組，不刪。
-  if [ "$code" = "410" ] && [ "$(sed -n 's/^key=//p' "$file" | head -n 1)" = "$key" ]; then
-    rm -rf "${file%/pairing}"
-  fi
+  post_push "$file" "$key" "$endpoint" "$(printf '"workspace":"%s","status":"%s"%s%s' "$workspace" "$status" "$extra" "$tab_field")"
 done
