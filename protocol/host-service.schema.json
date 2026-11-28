@@ -212,9 +212,82 @@
           "items": { "$ref": "#/$defs/Tab" },
           "description": "herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。"
         },
+        "panes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Pane" },
+          "description": "herdr session.snapshot 的每個 Pane(含沒有 Agent 的純終端機 Pane,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 panes 時為空陣列。"
+        },
+        "layouts": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/Layout" },
+          "description": "herdr session.snapshot 的每個 Tab 的版面(Pane 排列與分割,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 layouts 時為空陣列。"
+        },
         "agents": { "type": "array", "items": { "$ref": "#/$defs/Agent" } }
       },
       "required": ["type", "request_id", "workspaces", "agents"]
+    },
+    "Pane": {
+      "description": "herdr session.snapshot 的 Pane(欄位名照 herdr 原樣)。純終端機 Pane 沒有 agent 與 agent_session,agent_status 為 unknown。",
+      "type": "object",
+      "properties": {
+        "pane_id": { "type": "string" },
+        "terminal_id": { "type": "string" },
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "focused": { "type": "boolean" },
+        "cwd": { "type": "string" },
+        "foreground_cwd": { "type": "string" },
+        "agent": { "type": "string", "description": "herdr 的 agent 名稱，例如 claude、codex;純終端機 Pane 省略。" },
+        "agent_status": { "$ref": "#/$defs/AgentStatus" },
+        "terminal_title": { "type": "string", "description": "終端機標題原文(含狀態符號)。" },
+        "terminal_title_stripped": { "type": "string", "description": "去掉狀態符號的終端機標題。" },
+        "agent_session": { "$ref": "#/$defs/AgentSession" }
+      },
+      "required": ["pane_id", "workspace_id", "tab_id", "focused", "agent_status"]
+    },
+    "Layout": {
+      "description": "herdr session.snapshot 的 Tab 版面(座標單位為終端機儲存格)。",
+      "type": "object",
+      "properties": {
+        "workspace_id": { "type": "string" },
+        "tab_id": { "type": "string" },
+        "zoomed": { "type": "boolean" },
+        "area": { "$ref": "#/$defs/LayoutRect" },
+        "focused_pane_id": { "type": "string" },
+        "panes": { "type": "array", "items": { "$ref": "#/$defs/LayoutPane" } },
+        "splits": { "type": "array", "items": { "$ref": "#/$defs/LayoutSplit" }, "description": "Tab 內的分割(由外而內,沒分割時為空陣列)。" }
+      },
+      "required": ["workspace_id", "tab_id", "zoomed", "area", "panes", "splits"]
+    },
+    "LayoutPane": {
+      "type": "object",
+      "properties": {
+        "pane_id": { "type": "string" },
+        "focused": { "type": "boolean" },
+        "rect": { "$ref": "#/$defs/LayoutRect" }
+      },
+      "required": ["pane_id", "focused", "rect"]
+    },
+    "LayoutSplit": {
+      "description": "Tab 版面裡的一個分割(herdr 原樣)。",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "description": "例如 split_0_root。" },
+        "direction": { "type": "string", "description": "herdr 的分割方向:right(左右分)或 down(上下分)。" },
+        "ratio": { "type": "number", "description": "第一個子區塊佔分割區的比例(0 到 1)。" },
+        "rect": { "$ref": "#/$defs/LayoutRect" }
+      },
+      "required": ["id", "direction", "ratio", "rect"]
+    },
+    "LayoutRect": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "integer" },
+        "y": { "type": "integer" },
+        "width": { "type": "integer" },
+        "height": { "type": "integer" }
+      },
+      "required": ["x", "y", "width", "height"]
     },
     "Tab": {
       "description": "herdr 的 Tab。",

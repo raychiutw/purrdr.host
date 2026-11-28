@@ -760,12 +760,18 @@ extension HostServiceProtocol {
         public var workspaces: [Workspace]
         /// herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。
         public var tabs: [Tab]?
+        /// herdr session.snapshot 的每個 Pane(含沒有 Agent 的純終端機 Pane,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 panes 時為空陣列。
+        public var panes: [Pane]?
+        /// herdr session.snapshot 的每個 Tab 的版面(Pane 排列與分割,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 layouts 時為空陣列。
+        public var layouts: [Layout]?
         public var agents: [Agent]
 
-        public init(requestId: String, workspaces: [Workspace], tabs: [Tab]? = nil, agents: [Agent]) {
+        public init(requestId: String, workspaces: [Workspace], tabs: [Tab]? = nil, panes: [Pane]? = nil, layouts: [Layout]? = nil, agents: [Agent]) {
             self.requestId = requestId
             self.workspaces = workspaces
             self.tabs = tabs
+            self.panes = panes
+            self.layouts = layouts
             self.agents = agents
         }
 
@@ -773,7 +779,164 @@ extension HostServiceProtocol {
             case requestId = "request_id"
             case workspaces
             case tabs
+            case panes
+            case layouts
             case agents
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// herdr session.snapshot 的 Pane(欄位名照 herdr 原樣)。純終端機 Pane 沒有 agent 與 agent_session,agent_status 為 unknown。
+    public struct Pane: Codable, Sendable, Equatable {
+        public var paneId: String
+        public var terminalId: String?
+        public var workspaceId: String
+        public var tabId: String
+        public var focused: Bool
+        public var cwd: String?
+        public var foregroundCwd: String?
+        /// herdr 的 agent 名稱，例如 claude、codex;純終端機 Pane 省略。
+        public var agent: String?
+        public var agentStatus: AgentStatus
+        /// 終端機標題原文(含狀態符號)。
+        public var terminalTitle: String?
+        /// 去掉狀態符號的終端機標題。
+        public var terminalTitleStripped: String?
+        public var agentSession: AgentSession?
+
+        public init(paneId: String, terminalId: String? = nil, workspaceId: String, tabId: String, focused: Bool, cwd: String? = nil, foregroundCwd: String? = nil, agent: String? = nil, agentStatus: AgentStatus, terminalTitle: String? = nil, terminalTitleStripped: String? = nil, agentSession: AgentSession? = nil) {
+            self.paneId = paneId
+            self.terminalId = terminalId
+            self.workspaceId = workspaceId
+            self.tabId = tabId
+            self.focused = focused
+            self.cwd = cwd
+            self.foregroundCwd = foregroundCwd
+            self.agent = agent
+            self.agentStatus = agentStatus
+            self.terminalTitle = terminalTitle
+            self.terminalTitleStripped = terminalTitleStripped
+            self.agentSession = agentSession
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case paneId = "pane_id"
+            case terminalId = "terminal_id"
+            case workspaceId = "workspace_id"
+            case tabId = "tab_id"
+            case focused
+            case cwd
+            case foregroundCwd = "foreground_cwd"
+            case agent
+            case agentStatus = "agent_status"
+            case terminalTitle = "terminal_title"
+            case terminalTitleStripped = "terminal_title_stripped"
+            case agentSession = "agent_session"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// herdr session.snapshot 的 Tab 版面(座標單位為終端機儲存格)。
+    public struct Layout: Codable, Sendable, Equatable {
+        public var workspaceId: String
+        public var tabId: String
+        public var zoomed: Bool
+        public var area: LayoutRect
+        public var focusedPaneId: String?
+        public var panes: [LayoutPane]
+        /// Tab 內的分割(由外而內,沒分割時為空陣列)。
+        public var splits: [LayoutSplit]
+
+        public init(workspaceId: String, tabId: String, zoomed: Bool, area: LayoutRect, focusedPaneId: String? = nil, panes: [LayoutPane], splits: [LayoutSplit]) {
+            self.workspaceId = workspaceId
+            self.tabId = tabId
+            self.zoomed = zoomed
+            self.area = area
+            self.focusedPaneId = focusedPaneId
+            self.panes = panes
+            self.splits = splits
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case workspaceId = "workspace_id"
+            case tabId = "tab_id"
+            case zoomed
+            case area
+            case focusedPaneId = "focused_pane_id"
+            case panes
+            case splits
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    public struct LayoutPane: Codable, Sendable, Equatable {
+        public var paneId: String
+        public var focused: Bool
+        public var rect: LayoutRect
+
+        public init(paneId: String, focused: Bool, rect: LayoutRect) {
+            self.paneId = paneId
+            self.focused = focused
+            self.rect = rect
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case paneId = "pane_id"
+            case focused
+            case rect
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// Tab 版面裡的一個分割(herdr 原樣)。
+    public struct LayoutSplit: Codable, Sendable, Equatable {
+        /// 例如 split_0_root。
+        public var id: String
+        /// herdr 的分割方向:right(左右分)或 down(上下分)。
+        public var direction: String
+        /// 第一個子區塊佔分割區的比例(0 到 1)。
+        public var ratio: Double
+        public var rect: LayoutRect
+
+        public init(id: String, direction: String, ratio: Double, rect: LayoutRect) {
+            self.id = id
+            self.direction = direction
+            self.ratio = ratio
+            self.rect = rect
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id
+            case direction
+            case ratio
+            case rect
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    public struct LayoutRect: Codable, Sendable, Equatable {
+        public var x: Int
+        public var y: Int
+        public var width: Int
+        public var height: Int
+
+        public init(x: Int, y: Int, width: Int, height: Int) {
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case x
+            case y
+            case width
+            case height
         }
     }
 }

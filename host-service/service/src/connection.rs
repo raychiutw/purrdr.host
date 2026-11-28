@@ -39,6 +39,7 @@ use crate::protocol::{
     QueueReorderResult, ServerMessage, SessionsList, SessionsListResult, SubscribedEvent, Tab, TerminalScrollDirection, TerminalScrollSource, TranscriptLocate,
     UsageCodexResult, Welcome, Workspace,
 };
+use crate::protocol::{Layout, LayoutPane, LayoutRect, LayoutSplit, Pane};
 use crate::push_plugin::{PushFailure, PushPlugin, PushState};
 use crate::remote_management::{self, ServiceManagement};
 use crate::session_history;
@@ -1185,6 +1186,10 @@ struct HerdrSnapshot {
     #[serde(default, deserialize_with = "lenient_list")]
     tabs: Vec<HerdrTab>,
     #[serde(default, deserialize_with = "lenient_list")]
+    panes: Vec<HerdrPane>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    layouts: Vec<HerdrLayout>,
+    #[serde(default, deserialize_with = "lenient_list")]
     agents: Vec<HerdrAgent>,
 }
 
@@ -1196,6 +1201,97 @@ struct HerdrTab {
     workspace_id: String,
     #[serde(default, deserialize_with = "lenient_value")]
     label: String,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrPane {
+    #[serde(default, deserialize_with = "lenient_value")]
+    pane_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    terminal_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    workspace_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    tab_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    focused: bool,
+    #[serde(default, deserialize_with = "lenient_value")]
+    cwd: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    foreground_cwd: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    agent: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    agent_status: Option<AgentStatus>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    terminal_title: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    terminal_title_stripped: Option<String>,
+    #[serde(default, deserialize_with = "lenient_value")]
+    agent_session: Option<AgentSession>,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrLayout {
+    #[serde(default, deserialize_with = "lenient_value")]
+    workspace_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    tab_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    zoomed: bool,
+    #[serde(default, deserialize_with = "lenient_value")]
+    area: HerdrRect,
+    #[serde(default, deserialize_with = "lenient_value")]
+    focused_pane_id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    panes: Vec<HerdrLayoutPane>,
+    #[serde(default, deserialize_with = "lenient_list")]
+    splits: Vec<HerdrLayoutSplit>,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrLayoutPane {
+    #[serde(default, deserialize_with = "lenient_value")]
+    pane_id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    focused: bool,
+    #[serde(default, deserialize_with = "lenient_value")]
+    rect: HerdrRect,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrLayoutSplit {
+    #[serde(default, deserialize_with = "lenient_value")]
+    id: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    direction: String,
+    #[serde(default, deserialize_with = "lenient_value")]
+    ratio: f64,
+    #[serde(default, deserialize_with = "lenient_value")]
+    rect: HerdrRect,
+}
+
+#[derive(Deserialize, Default)]
+struct HerdrRect {
+    #[serde(default, deserialize_with = "lenient_value")]
+    x: i64,
+    #[serde(default, deserialize_with = "lenient_value")]
+    y: i64,
+    #[serde(default, deserialize_with = "lenient_value")]
+    width: i64,
+    #[serde(default, deserialize_with = "lenient_value")]
+    height: i64,
+}
+
+impl From<HerdrRect> for LayoutRect {
+    fn from(rect: HerdrRect) -> Self {
+        LayoutRect {
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height,
+        }
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -1259,6 +1355,54 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
             label: tab.label,
         })
         .collect();
+    let panes = snapshot
+        .panes
+        .into_iter()
+        .map(|pane| Pane {
+            pane_id: pane.pane_id,
+            terminal_id: pane.terminal_id,
+            workspace_id: pane.workspace_id,
+            tab_id: pane.tab_id,
+            focused: pane.focused,
+            cwd: pane.cwd,
+            foreground_cwd: pane.foreground_cwd,
+            agent: pane.agent,
+            agent_status: pane.agent_status.unwrap_or(AgentStatus::Unknown),
+            terminal_title: pane.terminal_title,
+            terminal_title_stripped: pane.terminal_title_stripped,
+            agent_session: pane.agent_session,
+        })
+        .collect();
+    let layouts = snapshot
+        .layouts
+        .into_iter()
+        .map(|layout| Layout {
+            workspace_id: layout.workspace_id,
+            tab_id: layout.tab_id,
+            zoomed: layout.zoomed,
+            area: layout.area.into(),
+            focused_pane_id: layout.focused_pane_id,
+            panes: layout
+                .panes
+                .into_iter()
+                .map(|pane| LayoutPane {
+                    pane_id: pane.pane_id,
+                    focused: pane.focused,
+                    rect: pane.rect.into(),
+                })
+                .collect(),
+            splits: layout
+                .splits
+                .into_iter()
+                .map(|split| LayoutSplit {
+                    id: split.id,
+                    direction: split.direction,
+                    ratio: split.ratio,
+                    rect: split.rect.into(),
+                })
+                .collect(),
+        })
+        .collect();
     let agents = snapshot
         .agents
         .into_iter()
@@ -1277,6 +1421,8 @@ fn agents_list_result(request_id: String, result: Value) -> AgentsListResult {
         request_id,
         workspaces,
         tabs: Some(tabs),
+        panes: Some(panes),
+        layouts: Some(layouts),
         agents,
     }
 }
