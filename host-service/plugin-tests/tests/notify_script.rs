@@ -25,8 +25,8 @@ fn manifest_declares_hooks() {
     let manifest: toml::Table = text.parse().unwrap();
     assert_eq!(manifest["id"].as_str(), Some(PLUGIN_ID));
     // 0.2.0 起會讓位給主機服務的 lease(raychiutw/purrdr.host#48);主機服務靠這個版本號判斷舊 plugin 不能共存。
-    // 0.2.1 起推播多帶 tab(raychiutw/purrdr.host#74)。
-    assert_eq!(manifest["version"].as_str(), Some("0.2.1"));
+    // 0.2.1 起推播多帶 tab(raychiutw/purrdr.host#74);0.3.0 起帶工作秒數與方案用量(#96 #98)。
+    assert_eq!(manifest["version"].as_str(), Some("0.3.0"));
 
     let events = manifest["events"].as_array().expect("沒有 [[events]]");
     let hooks: Vec<(&str, Vec<&str>, Vec<&str>)> = events

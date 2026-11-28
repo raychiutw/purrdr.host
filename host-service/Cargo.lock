@@ -1661,7 +1661,7 @@ dependencies = [
 
 [[package]]
 name = "purrdr-host-service"
-version = "0.15.0"
+version = "0.16.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
