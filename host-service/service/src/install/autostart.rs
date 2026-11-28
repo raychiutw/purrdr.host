@@ -103,6 +103,9 @@ fn stop_windows_background(system: &mut impl HostSystem, layout: &ServiceLayout,
         taskkill.extend(["/FI".to_owned(), format!("USERNAME eq {user_name}")]);
     }
     let _ = system.run("taskkill", &taskkill);
+    // `taskkill /F` 讓服務沒機會記關閉紀錄。這是安裝／更新有意的停止,不是當機:
+    // 清掉 running.json,下一次啟動才不會誤報「上次未正常關閉」(真正被強制結束的仍由偵測補上)。
+    crate::running_service::remove(&layout.directory());
 }
 
 /// 停止並取消登記，刪除登記檔;沒有登記時不算失敗。

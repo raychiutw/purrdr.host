@@ -20,6 +20,8 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     let log = crate::service_log::ServiceLog::under(&state_directory);
     crate::shutdown::install_panic_hook(log.clone());
     crate::shutdown::report_unclean_previous_run(&state_directory, &log, std::process::id(), &crate::shutdown::SystemProcesses);
+    // 訊號處理器要在任何啟動工作之前就位,否則啟動窗口內的 SIGTERM 會被預設動作直接殺掉。
+    let signals = crate::shutdown::TerminationSignals::install();
     let service = match crate::start(config).await {
         Ok(service) => service,
         Err(error) => {
@@ -42,12 +44,12 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     repair_command_alias(&log);
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket, service.plugin_updater());
-    let reason = tokio::select! {
-        reason = crate::shutdown::wait_for_termination() => reason,
-        () = service.wait() => "the listener loop ended",
+    startup_delay_for_tests().await;
+    let termination = tokio::select! {
+        reason = signals.wait() => crate::shutdown::Termination::Signal(reason),
+        () = service.wait() => crate::shutdown::Termination::ListenerEnded,
     };
-    crate::shutdown::record_shutdown(&state_directory, &log, reason);
-    ExitCode::SUCCESS
+    ExitCode::from(crate::shutdown::conclude(&state_directory, &log, termination))
 }
 
 /// 安裝好的那份啟動時補上指令別名 `purrdr`;沒補成只記 log,不影響服務。
@@ -63,3 +65,14 @@ fn repair_command_alias(log: &crate::service_log::ServiceLog) {
         _ => {}
     }
 }
+
+/// 測試用:`PURRDR_TEST_STARTUP_DELAY_MS` 把啟動拉長,讓測試能在啟動窗口內送訊號(只有 debug 建置認得)。
+#[cfg(debug_assertions)]
+async fn startup_delay_for_tests() {
+    if let Some(milliseconds) = std::env::var("PURRDR_TEST_STARTUP_DELAY_MS").ok().and_then(|value| value.parse().ok()) {
+        tokio::time::sleep(std::time::Duration::from_millis(milliseconds)).await;
+    }
+}
+
+#[cfg(not(debug_assertions))]
+async fn startup_delay_for_tests() {}

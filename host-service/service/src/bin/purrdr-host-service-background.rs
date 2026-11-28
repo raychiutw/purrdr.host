@@ -4,8 +4,8 @@
 
 use std::process::ExitCode;
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
-    purrdr_host_service::run_service(&arguments).await
+    // 與 `purrdr-host-service` 一樣:結束時不無限等 spawn_blocking 的工作。
+    purrdr_host_service::shutdown::run_with_grace(purrdr_host_service::run_service(&arguments), std::time::Duration::from_secs(3))
 }

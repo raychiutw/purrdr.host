@@ -128,6 +128,23 @@ fn windows_install_registers_windowless_executable_at_logon_and_starts_it() {
 }
 
 #[test]
+fn windows_stopping_the_service_clears_running_json_so_the_restart_is_not_reported_as_a_crash() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    let marker = host.service_directory().join("running.json");
+
+    // 重新安裝會先以 taskkill /F 停掉舊的服務;它寫不出關閉紀錄,所以停止的人要清掉 running.json。
+    std::fs::write(&marker, r#"{"version":"0.17.0","port":47820,"pid":4242,"started_at_ms":1795860000000}"#).unwrap();
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    assert!(!marker.exists(), "重新安裝停掉服務後 running.json 應被清掉");
+
+    std::fs::write(&marker, r#"{"version":"0.17.0","port":47820,"pid":4242,"started_at_ms":1795860000000}"#).unwrap();
+    installer.uninstall().unwrap();
+    assert!(!marker.exists());
+}
+
+#[test]
 fn windows_uninstall_from_installed_copy_removes_files_after_it_exits() {
     let host = TestHost::new(InstallPlatform::Windows);
     let home_before = snapshot(&host.home.0);
