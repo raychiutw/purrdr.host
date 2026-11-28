@@ -31,6 +31,8 @@ pub struct SocketEnvironment {
     pub claude_config_dir: Option<String>,
     /// `CODEX_HOME`(對話紀錄位置，#59)。
     pub codex_home: Option<String>,
+    /// `GROK_HOME`(對話紀錄位置，#105)。
+    pub grok_home: Option<String>,
 }
 
 impl SocketEnvironment {
@@ -45,6 +47,7 @@ impl SocketEnvironment {
             user_profile: variable("USERPROFILE"),
             claude_config_dir: variable("CLAUDE_CONFIG_DIR"),
             codex_home: variable("CODEX_HOME"),
+            grok_home: variable("GROK_HOME"),
         }
     }
 }

@@ -3,7 +3,9 @@
 //! 只讀 agent_session 指向的檔案：位置由 agent 種類、session 與 cwd 決定，app 不能指定路徑。
 
 use std::fs::File;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
+
+use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 use crate::herdr_socket::{Platform, SocketEnvironment};
@@ -17,6 +19,8 @@ pub struct TranscriptEnvironment {
     pub claude_config_dir: Option<PathBuf>,
     /// `CODEX_HOME`。
     pub codex_home: Option<PathBuf>,
+    /// `GROK_HOME`。
+    pub grok_home: Option<PathBuf>,
 }
 
 impl TranscriptEnvironment {
@@ -31,6 +35,7 @@ impl TranscriptEnvironment {
             home: path(home),
             claude_config_dir: path(&environment.claude_config_dir),
             codex_home: path(&environment.codex_home),
+            grok_home: path(&environment.grok_home),
         }
     }
 }
@@ -70,7 +75,11 @@ pub fn locate(environment: &TranscriptEnvironment, session: &AgentSessionInfo) -
         }
         ("codex", "id") => {
             require_safe_id(&session.value)?;
-            locate_codex(environment, &session.value)
+            locate_codex(environment, &session.value, Some(&session.cwd))
+        }
+        ("grok", "id") => {
+            require_safe_id(&session.value)?;
+            locate_grok(environment, &session.value)
         }
         ("agy", "id") => {
             require_safe_id(&session.value)?;
@@ -92,8 +101,10 @@ fn is_safe_reported_path(path: &str) -> bool {
 }
 
 /// `${CODEX_HOME:-~/.codex}` 的 sessions 與 archived_sessions 下的 `rollout-*-<id>.jsonl`(含倒帶的 `_<rolloutId>`,§4.2)。
-/// 不只一個時不猜(SSH 路線會問 Codex 的狀態資料庫;主機服務不執行指令，所以回有歧義)。
-pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
+/// 不只一個時(SSH 路線問 Codex 的狀態資料庫;主機服務不執行指令也不開 SQLite)改看各檔第一行 session_meta:
+/// 先留下 `payload.id` 是這個 session 的，有 `cwd`(pane 的工作目錄)時再留下 cwd 相同的;
+/// 還有多個就取 `payload.timestamp` 唯一最新的(倒帶產生的 rollout 較新)。仍分不出來回有歧義，不猜。
+pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str, cwd: Option<&str>) -> Result<PathBuf, TranscriptFailure> {
     let codex_home = codex_home(environment);
     let mut rollouts = Vec::new();
     let mut compressed = false;
@@ -115,6 +126,72 @@ pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str
         0 if compressed => Err(TranscriptFailure::Compressed),
         0 => Err(TranscriptFailure::Absent),
         1 => Ok(rollouts.remove(0)),
+        _ => pick_codex_rollout(rollouts, session_id, cwd),
+    }
+}
+
+fn pick_codex_rollout(rollouts: Vec<PathBuf>, session_id: &str, cwd: Option<&str>) -> Result<PathBuf, TranscriptFailure> {
+    let mut candidates: Vec<(PathBuf, Option<String>, Option<String>)> = rollouts
+        .into_iter()
+        .filter_map(|path| {
+            let meta = codex_session_meta(&path)?;
+            let field = |name: &str| meta.get(name).and_then(Value::as_str).map(str::to_owned);
+            (field("id").as_deref() == Some(session_id)).then(|| (path, field("cwd"), field("timestamp")))
+        })
+        .collect();
+    if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty()) {
+        let same_cwd: Vec<_> = candidates
+            .iter()
+            .filter(|(_, candidate, _)| candidate.as_deref() == Some(cwd))
+            .cloned()
+            .collect();
+        if !same_cwd.is_empty() {
+            candidates = same_cwd;
+        }
+    }
+    if candidates.len() == 1 {
+        return Ok(candidates.remove(0).0);
+    }
+    let newest = candidates.iter().filter_map(|(_, _, timestamp)| timestamp.as_deref()).max();
+    let mut newest_ones = candidates.iter().filter(|(_, _, timestamp)| newest.is_some() && timestamp.as_deref() == newest);
+    match (newest_ones.next(), newest_ones.next()) {
+        (Some((path, _, _)), None) => Ok(path.clone()),
+        _ => Err(TranscriptFailure::Ambiguous),
+    }
+}
+
+/// rollout 第一行 `session_meta` 的 payload;讀不到或不是 session_meta 回 None。
+fn codex_session_meta(path: &Path) -> Option<Value> {
+    use std::io::{BufRead, BufReader};
+    let mut line = Vec::new();
+    // 第一行可能很長(內含 instructions);讀到換行為止，最多 1 MiB。
+    BufReader::new(File::open(path).ok()?).take(1 << 20).read_until(b'\n', &mut line).ok()?;
+    let object: Value = serde_json::from_slice(&line).ok()?;
+    (object.get("type")?.as_str()? == "session_meta")
+        .then(|| object.get("payload").cloned())
+        .flatten()
+}
+
+/// `${GROK_HOME:-~/.grok}/sessions/<任一層>/<id>/updates.jsonl`(行為規格 §4.3;SSH 腳本是 `find sessions -mindepth 2 -maxdepth 2 -type d -name <id>`)。
+/// 資料夾不只一個回有歧義，沒有回缺席。
+pub(crate) fn locate_grok(environment: &TranscriptEnvironment, session_id: &str) -> Result<PathBuf, TranscriptFailure> {
+    let sessions = environment
+        .grok_home
+        .clone()
+        .unwrap_or_else(|| home_relative(environment, &[".grok"]))
+        .join("sessions");
+    let Ok(parents) = std::fs::read_dir(&sessions) else {
+        return Err(TranscriptFailure::Absent);
+    };
+    let mut found: Vec<PathBuf> = parents
+        .filter_map(Result::ok)
+        .filter(|parent| parent.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|parent| parent.path().join(session_id))
+        .filter(|session| std::fs::symlink_metadata(session).is_ok_and(|metadata| metadata.is_dir()))
+        .collect();
+    match found.len() {
+        0 => Err(TranscriptFailure::Absent),
+        1 => Ok(found.remove(0).join("updates.jsonl")),
         _ => Err(TranscriptFailure::Ambiguous),
     }
 }
