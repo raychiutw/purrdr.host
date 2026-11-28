@@ -255,6 +255,34 @@ async fn blocked_and_done_are_sent_directly_once_per_transition() {
     wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pB") == 2, "再次 blocked 沒有送").await;
 }
 
+/// done 推播帶 `workSeconds`(raychiutw/purrdr.host#96):pane 進入 working 到 done 的秒數;沒看過進入 working 就省略。
+async fn done_carries_work_seconds_only_when_the_work_start_is_known() {
+    let harness = Harness::start(None).await;
+    harness.wait_for_lease().await;
+
+    harness.event("w1:pB", "working");
+    harness.event("w1:pB", "done");
+    wait(|| harness.sent(PHONE_KEY, "done", "w1:pB") == 1, "等不到 done").await;
+    // 沒有先看到 working 的 done。
+    harness.event("w1:pA", "done");
+    wait(|| harness.sent(PHONE_KEY, "done", "w1:pA") == 1, "等不到沒有開始時間的 done").await;
+
+    let bodies = harness.backend.bodies();
+    let find = |pane: &str| {
+        bodies
+            .iter()
+            .find(|body| body["key"] == PHONE_KEY && body["pane"] == pane && body["status"] == "done")
+            .unwrap()
+    };
+    assert!(find("w1:pB")["workSeconds"].is_u64(), "{bodies:?}");
+    assert!(find("w1:pA").get("workSeconds").is_none(), "{bodies:?}");
+    // blocked 不帶。
+    harness.event("w1:pB", "working");
+    harness.event("w1:pB", "blocked");
+    wait(|| harness.sent(PHONE_KEY, "blocked", "w1:pB") == 1, "等不到 blocked").await;
+    assert!(harness.bodies("blocked").iter().all(|body| body.get("workSeconds").is_none()));
+}
+
 async fn a_revoked_pairing_is_removed_when_sending_blocked() {
     let harness = Harness::start(None).await;
     harness.backend.respond_to_key(WATCH_KEY, 410);
@@ -690,6 +718,9 @@ fn tests() -> Vec<TestCase> {
         }),
         ("the_tab_is_omitted_without_a_label_and_an_agent", || {
             Box::pin(the_tab_is_omitted_without_a_label_and_an_agent())
+        }),
+        ("done_carries_work_seconds_only_when_the_work_start_is_known", || {
+            Box::pin(done_carries_work_seconds_only_when_the_work_start_is_known())
         }),
         ("a_revoked_pairing_is_removed_when_sending_blocked", || {
             Box::pin(a_revoked_pairing_is_removed_when_sending_blocked())

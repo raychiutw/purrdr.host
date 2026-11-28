@@ -32,6 +32,8 @@ pub struct AttentionDetector {
     pub stuck_after: Duration,
     pub reminder_after: Duration,
     periods: BTreeMap<String, Period>,
+    /// 各 pane 最近一次(由事件得知)進入 working 的時間,供 done 推播算 `workSeconds`(raychiutw/purrdr.host#96);只存在記憶體,重啟後為空。
+    working_since: BTreeMap<String, Instant>,
 }
 
 impl Default for AttentionDetector {
@@ -46,13 +48,33 @@ impl AttentionDetector {
             stuck_after,
             reminder_after,
             periods: BTreeMap::new(),
+            working_since: BTreeMap::new(),
         }
     }
 
     /// herdr 回報的狀態;跟目前一樣時不是新期間。
     pub fn status(&mut self, pane_id: &str, status: &str, now: Instant) {
+        self.update(pane_id, status, now, true);
+    }
+
+    fn update(&mut self, pane_id: &str, status: &str, now: Instant, from_event: bool) {
+        if matches!(status, "idle" | "done") {
+            self.working_since.remove(pane_id);
+        }
         if self.periods.get(pane_id).is_some_and(|period| period.status == status) {
+            // 事件回報 working 而 snapshot 先前已讓期間是 working:事件才是進入的證據,補記開始時間(已有就不動)。
+            if from_event && status == "working" {
+                self.working_since.entry(pane_id.to_owned()).or_insert(now);
+            }
             return;
+        }
+        if status == "working" {
+            // 只有事件知道真正的進入時間;snapshot 才看到的轉換不留舊值(那會高報)。
+            if from_event {
+                self.working_since.insert(pane_id.to_owned(), now);
+            } else {
+                self.working_since.remove(pane_id);
+            }
         }
         self.periods.insert(
             pane_id.to_owned(),
@@ -81,6 +103,19 @@ impl AttentionDetector {
         }
         period.alerted = true;
         Some(Alert::Stuck)
+    }
+
+    /// 讀 snapshot 對帳得到的狀態:同 `status`,但不把「現在」當成進入 working 的時間
+    /// (重啟或斷線後才看到 pane 在 working,真正的開始時間不知道,done 推播就不帶 `workSeconds`)。
+    pub fn snapshot_status(&mut self, pane_id: &str, status: &str, now: Instant) {
+        self.update(pane_id, status, now, false);
+    }
+
+    /// pane 做完時回報工作秒數(進入 working 到 `now`,無條件捨去)並用掉這個開始時間。
+    /// 沒有開始時間或 `now` 早於開始時間(事件亂序)時回 None。要在 `status(done)` 之前呼叫。
+    pub fn finish_work(&mut self, pane_id: &str, now: Instant) -> Option<u64> {
+        let since = self.working_since.remove(pane_id)?;
+        now.checked_duration_since(since).map(|elapsed| elapsed.as_secs())
     }
 
     /// 這次判定為仍在等你的 pane。
