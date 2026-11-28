@@ -25,7 +25,7 @@ serde_json.workspace = true
 sha2 = "0.11.1"
 subtle = "2.6.1"
 tar = "0.4.46"
-tokio = { workspace = true, features = ["process"] }
+tokio = { workspace = true, features = ["process", "signal"] }
 # 安裝時檢查 herdr config.toml:按鍵是否已被占用、加上快捷鍵後是否仍是合法 TOML。
 toml = "1.2.1"
 # 主機取檔排除清單比對前做 NFKC,擋下 ſ、ﬅ 這類相似字元(raychiutw/purrdr.host#94)。
@@ -40,7 +40,7 @@ libc = "0.2.191"
 
 [target.'cfg(windows)'.dependencies]
 # 背景啟動程式前把自己的標準 handle 設成不可繼承(raychiutw/purrdr.host#35)。
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Console", "Win32_System_Threading"] }
 
 [dev-dependencies]
 futures-util.workspace = true

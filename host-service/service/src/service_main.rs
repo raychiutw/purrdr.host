@@ -18,6 +18,8 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     let herdr_socket = config.herdr_socket.clone();
     let state_directory = config.state_directory.clone();
     let log = crate::service_log::ServiceLog::under(&state_directory);
+    crate::shutdown::install_panic_hook(log.clone());
+    crate::shutdown::report_unclean_previous_run(&state_directory, &log, std::process::id(), &crate::shutdown::SystemProcesses);
     let service = match crate::start(config).await {
         Ok(service) => service,
         Err(error) => {
@@ -40,7 +42,11 @@ pub async fn run_service(arguments: &[String]) -> ExitCode {
     repair_command_alias(&log);
     // 安裝好的那份才會自動更新(開發中直接執行的不會)。
     let _auto_update = crate::auto_update::spawn_for_installed_service(herdr_socket, service.plugin_updater());
-    service.wait().await;
+    let reason = tokio::select! {
+        reason = crate::shutdown::wait_for_termination() => reason,
+        () = service.wait() => "the listener loop ended",
+    };
+    crate::shutdown::record_shutdown(&state_directory, &log, reason);
     ExitCode::SUCCESS
 }
 

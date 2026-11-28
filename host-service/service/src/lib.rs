@@ -36,6 +36,7 @@ pub mod protocol;
 pub mod remote_management;
 pub mod running_service;
 pub mod service_log;
+pub mod shutdown;
 mod slash_list;
 pub mod state_directory;
 mod structure_operations;
