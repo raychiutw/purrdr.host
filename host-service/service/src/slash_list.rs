@@ -38,16 +38,17 @@ pub struct Listing {
     pub truncated: bool,
 }
 
-/// `home` 是主機服務的家目錄;`state_directory` 是主機服務資料夾(一律不讀)。沒有家目錄或沒有 `.claude` 回空清單。
-pub fn list(home: Option<&Path>, state_directory: &Path) -> Listing {
-    list_with_scan_limit(home, state_directory, MAXIMUM_SCANNED_ENTRIES)
+/// `home` 是主機服務的家目錄;`claude_config_dir` 是 `CLAUDE_CONFIG_DIR`(沒設就用 `<home>/.claude`,與對話紀錄的解析相同);
+/// `state_directory` 是主機服務資料夾(一律不讀)。沒有家目錄或沒有設定目錄回空清單。
+pub fn list(home: Option<&Path>, claude_config_dir: Option<&Path>, state_directory: &Path) -> Listing {
+    list_with_scan_limit(home, claude_config_dir, state_directory, MAXIMUM_SCANNED_ENTRIES)
 }
 
-fn list_with_scan_limit(home: Option<&Path>, state_directory: &Path, scan_limit: usize) -> Listing {
+fn list_with_scan_limit(home: Option<&Path>, claude_config_dir: Option<&Path>, state_directory: &Path, scan_limit: usize) -> Listing {
     let Some(home) = home.and_then(host_files::resolve) else {
         return Listing::default();
     };
-    let claude = home.join(".claude");
+    let claude = claude_config_dir.map_or_else(|| home.join(".claude"), Path::to_owned);
     let Some(claude) = host_files::resolve(&claude).filter(|resolved| resolved.is_dir()) else {
         return Listing::default();
     };
@@ -121,7 +122,8 @@ impl Scanner {
         let mut head = Vec::new();
         file.take(MAXIMUM_FRONTMATTER_BYTES).read_to_end(&mut head).ok()?;
         let text = String::from_utf8_lossy(&head);
-        let mut lines = text.lines();
+        // 有些編輯器會在檔頭寫 UTF-8 BOM,不該讓 frontmatter 被當成不存在。
+        let mut lines = text.strip_prefix('\u{feff}').unwrap_or(&text).lines();
         if lines.next()?.trim_end() != "---" {
             return None;
         }
@@ -130,9 +132,21 @@ impl Scanner {
 
     /// 一個資料夾直接含 `SKILL.md` 就是一個 skill;否則它的每個子資料夾各自可以有 `SKILL.md`(一層)。
     fn skills(&mut self, root: &Path, origin: &Origin) {
-        let Some(resolved) = self.allowed(root).filter(|resolved| resolved.is_dir()) else {
+        let Some(resolved) = self.allowed(root) else {
             return;
         };
+        // plugin.json 直接指到一個 `SKILL.md`:那個檔案所在的資料夾就是一個 skill。
+        if resolved.is_file() {
+            if root.file_name().is_some_and(|name| name == "SKILL.md")
+                && let Some(folder) = root.parent()
+            {
+                self.add_skill(folder, origin);
+            }
+            return;
+        }
+        if !resolved.is_dir() {
+            return;
+        }
         if resolved.join("SKILL.md").is_file() {
             self.add_skill(root, origin);
             return;
@@ -154,6 +168,16 @@ impl Scanner {
 
     /// `root` 底下所有 `.md`(遞迴、跟著 symlink);名稱是相對 `root` 的路徑，`/` 換成 `:`。
     fn commands(&mut self, root: &Path, origin: &Origin) {
+        // plugin.json 直接指到一個 `.md` 檔:它就是一個指令,名稱取檔名(去掉 `.md`)。
+        if self.allowed(root).is_some_and(|resolved| resolved.is_file()) {
+            if let Some(parent) = root.parent()
+                && let Some(local) = command_name(parent, root)
+                && let Some(lines) = self.read_frontmatter(root)
+            {
+                self.add(origin, local, &parse_frontmatter(&lines));
+            }
+            return;
+        }
         let mut visited = HashSet::new();
         self.walk_commands(root, root, origin, 0, &mut visited);
     }
@@ -234,8 +258,16 @@ impl Scanner {
         let Some(plugins) = installed.as_ref().and_then(|document| document.get("plugins")).and_then(Value::as_object) else {
             return Vec::new();
         };
-        let settings = self.read_json(&claude.join("settings.json"));
-        let enabled = settings.as_ref().and_then(|document| document.get("enabledPlugins")).and_then(Value::as_object);
+        // settings.json 與 settings.local.json 的 enabledPlugins 合併,local 覆蓋同名的鍵。
+        let mut enabled = serde_json::Map::new();
+        for file in ["settings.json", "settings.local.json"] {
+            if let Some(layer) = self
+                .read_json(&claude.join(file))
+                .and_then(|document| document.get("enabledPlugins").and_then(Value::as_object).cloned())
+            {
+                enabled.extend(layer);
+            }
+        }
         let mut keys: Vec<&String> = plugins.keys().collect();
         keys.sort();
         if keys.len() > MAXIMUM_PLUGINS {
@@ -246,7 +278,7 @@ impl Scanner {
         let mut disabled = BTreeSet::new();
         for key in keys {
             let fallback = key.split('@').next().unwrap_or(key).to_owned();
-            if enabled.and_then(|enabled| enabled.get(key)).and_then(Value::as_bool) == Some(false) {
+            if enabled.get(key).and_then(Value::as_bool) == Some(false) {
                 disabled.insert(fallback);
                 continue;
             }
@@ -443,7 +475,7 @@ mod tests {
             write(&home.path().join(format!(".claude/commands/c{index:05}.md")), "---\ndescription: x\n---\n");
         }
 
-        let listing = list_with_scan_limit(Some(home.path()), state.path(), usize::MAX);
+        let listing = list_with_scan_limit(Some(home.path()), None, state.path(), usize::MAX);
 
         assert_eq!(listing.commands.len(), MAXIMUM_COMMANDS);
         assert!(listing.truncated);
@@ -457,11 +489,11 @@ mod tests {
             write(&home.path().join(format!(".claude/commands/c{index:02}.md")), "---\ndescription: x\n---\n");
         }
 
-        let listing = list_with_scan_limit(Some(home.path()), state.path(), 5);
+        let listing = list_with_scan_limit(Some(home.path()), None, state.path(), 5);
 
         assert_eq!(listing.commands.len(), 5, "只掃前 5 個項目");
         assert!(listing.truncated);
-        assert!(!list_with_scan_limit(Some(home.path()), state.path(), 100).truncated);
+        assert!(!list_with_scan_limit(Some(home.path()), None, state.path(), 100).truncated);
     }
 
     #[test]
@@ -479,7 +511,7 @@ mod tests {
             &format!("---\ndescription: ok\n{}", "z: 1\n".repeat(100_000)),
         );
 
-        let listing = list_with_scan_limit(Some(home.path()), state.path(), usize::MAX);
+        let listing = list_with_scan_limit(Some(home.path()), None, state.path(), usize::MAX);
 
         let long = listing.commands.iter().find(|command| command.name == "long").unwrap();
         assert_eq!(long.summary.chars().count(), MAXIMUM_SUMMARY_CHARS);
@@ -496,7 +528,7 @@ mod tests {
             write(&home.path().join(".claude/commands/a/one.md"), "---\ndescription: x\n---\n");
             std::os::unix::fs::symlink(home.path().join(".claude/commands"), home.path().join(".claude/commands/a/back")).unwrap();
 
-            let listing = list_with_scan_limit(Some(home.path()), state.path(), usize::MAX);
+            let listing = list_with_scan_limit(Some(home.path()), None, state.path(), usize::MAX);
 
             assert_eq!(listing.commands.iter().map(|command| command.name.as_str()).collect::<Vec<_>>(), ["a:one"]);
         }

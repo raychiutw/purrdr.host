@@ -15,12 +15,19 @@ struct Fixture {
     _root: TempDir,
     base: PathBuf,
     home: PathBuf,
+    /// Claude 設定目錄(相對家目錄):預設 `.claude`,測試可指定 `CLAUDE_CONFIG_DIR` 的替身。
+    config: String,
     _herdr: FakeHerdr,
     service: TestHostService,
 }
 
 impl Fixture {
     async fn start() -> Fixture {
+        Fixture::start_with_config(None).await
+    }
+
+    /// `config_dir` 是相對家目錄的設定目錄(等同環境變數 `CLAUDE_CONFIG_DIR`);用注入的 `TranscriptEnvironment`,不動全域環境變數。
+    async fn start_with_config(config_dir: Option<&str>) -> Fixture {
         let root = tempfile::tempdir_in(support::test_files_directory()).unwrap();
         let canonical = std::fs::canonicalize(root.path()).unwrap().to_string_lossy().into_owned();
         let base = PathBuf::from(canonical.strip_prefix(r"\\?\").unwrap_or(&canonical));
@@ -33,6 +40,7 @@ impl Fixture {
             FileServiceOptions {
                 transcripts: TranscriptEnvironment {
                     home: Some(home.clone()),
+                    claude_config_dir: config_dir.map(|relative| home.join(relative)),
                     ..TranscriptEnvironment::default()
                 },
                 temporary_directory: None,
@@ -44,6 +52,7 @@ impl Fixture {
             _root: root,
             base,
             home,
+            config: config_dir.unwrap_or(".claude").to_owned(),
             _herdr: herdr,
             service,
         }
@@ -92,7 +101,7 @@ fn command<'a>(reply: &'a Value, name: &str) -> &'a Value {
 fn install_plugin(fixture: &Fixture, key: &str, install: &str, manifest: &str) {
     let path = fixture.home.join(install);
     let entry = json!({"scope": "user", "installPath": path.to_string_lossy(), "version": "1.0.0"});
-    let installed = fixture.home.join(".claude/plugins/installed_plugins.json");
+    let installed = fixture.home.join(&fixture.config).join("plugins/installed_plugins.json");
     let mut document: Value = std::fs::read_to_string(&installed)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
@@ -276,4 +285,81 @@ async fn malformed_json_files_give_an_empty_plugin_part_not_an_error() {
     let reply = fixture.slash_list().await;
 
     assert_eq!(names(&reply), ["ok"]);
+}
+
+#[tokio::test]
+async fn the_claude_config_dir_replaces_the_default_claude_folder() {
+    let fixture = Fixture::start_with_config(Some("elsewhere/claude-config")).await;
+    fixture.write("elsewhere/claude-config/commands/custom.md", "---\ndescription: from config dir\n---\n");
+    fixture.write(".claude/commands/default.md", "---\ndescription: from the default folder\n---\n");
+    install_plugin(
+        &fixture,
+        "tools@market",
+        "elsewhere/claude-config/plugins/cache/market/tools/1",
+        r#"{"name":"tools"}"#,
+    );
+    fixture.write(
+        "elsewhere/claude-config/plugins/cache/market/tools/1/commands/run.md",
+        "---\ndescription: run\n---\n",
+    );
+    fixture.write("elsewhere/claude-config/settings.json", r#"{"enabledPlugins":{"tools@market":true}}"#);
+
+    let reply = fixture.slash_list().await;
+
+    assert_eq!(names(&reply), ["custom", "tools:run"]);
+}
+
+#[tokio::test]
+async fn settings_local_json_overrides_enabled_plugins_in_both_directions() {
+    let fixture = Fixture::start().await;
+    for (key, name) in [("off-locally@market", "off-locally"), ("on-locally@market", "on-locally")] {
+        let install = format!(".claude/plugins/cache/market/{name}/1");
+        install_plugin(&fixture, key, &install, &format!(r#"{{"name":"{name}"}}"#));
+        fixture.write(&format!("{install}/commands/go.md"), "---\ndescription: go\n---\n");
+    }
+    fixture.write(
+        ".claude/settings.json",
+        r#"{"enabledPlugins":{"off-locally@market":true,"on-locally@market":false}}"#,
+    );
+    fixture.write(
+        ".claude/settings.local.json",
+        r#"{"enabledPlugins":{"off-locally@market":false,"on-locally@market":true}}"#,
+    );
+
+    let reply = fixture.slash_list().await;
+
+    assert_eq!(names(&reply), ["on-locally:go"]);
+    assert_eq!(reply["disabled_plugins"], json!(["off-locally"]));
+}
+
+#[tokio::test]
+async fn a_plugin_may_declare_a_single_command_file_and_a_single_skill_file() {
+    let fixture = Fixture::start().await;
+    let root = ".claude/plugins/cache/market/solo/1";
+    install_plugin(
+        &fixture,
+        "solo@market",
+        root,
+        r#"{"name":"solo","commands":"./extras/one-off.md","skills":["./extras/pick/SKILL.md"]}"#,
+    );
+    fixture.write(&format!("{root}/extras/one-off.md"), "---\ndescription: single command\n---\n");
+    fixture.write(&format!("{root}/extras/pick/SKILL.md"), "---\ndescription: single skill\n---\n");
+    fixture.write(&format!("{root}/extras/other.md"), "---\ndescription: not declared\n---\n");
+
+    let reply = fixture.slash_list().await;
+
+    assert_eq!(names(&reply), ["solo:one-off", "solo:pick"]);
+    assert_eq!(command(&reply, "solo:one-off")["summary"], "single command");
+}
+
+#[tokio::test]
+async fn a_utf8_bom_before_the_frontmatter_is_ignored() {
+    let fixture = Fixture::start().await;
+    fixture.write(".claude/skills/bom/SKILL.md", "\u{feff}---\nname: bom\ndescription: with bom\n---\n");
+    fixture.write(".claude/commands/bom-command.md", "\u{feff}---\ndescription: command with bom\n---\n");
+
+    let reply = fixture.slash_list().await;
+
+    assert_eq!(names(&reply), ["bom", "bom-command"]);
+    assert_eq!(command(&reply, "bom")["summary"], "with bom");
 }
