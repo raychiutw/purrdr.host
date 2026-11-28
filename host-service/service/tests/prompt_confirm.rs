@@ -6,6 +6,8 @@ mod support;
 use serde_json::{Value, json};
 use support::{FakeHerdr, TestClient, recorded, start_service};
 
+/// `agent.prompt` 結果裡 agent 的 `state_change_seq`(fixture 的值),當作送出後的基準。
+const PROMPT_SEQ: u64 = 1632;
 const P6_SESSION: &str = "00000000-0000-0000-0000-000000000001";
 
 fn hello() -> Value {
@@ -38,6 +40,8 @@ fn snapshot_with(status: &str, session: &str) -> Value {
         if agent["pane_id"] == "w1:p6" {
             agent["agent_status"] = json!(status);
             agent["agent_session"]["value"] = json!(session);
+            // 與 `written_prompt` 的基準相同:狀態沒轉換過。
+            agent["state_change_seq"] = json!(PROMPT_SEQ);
         }
     }
     snapshot
@@ -191,4 +195,44 @@ async fn codex_has_no_receipt_so_nothing_is_confirmed_or_sent() {
 
     assert!(reply.get("submit_confirmed").is_none(), "{reply}");
     assert_eq!(herdr.methods(), ["ping", "agent.prompt"]);
+}
+
+#[tokio::test]
+async fn an_agent_that_finished_before_the_wait_started_is_confirmed_without_enter() {
+    let herdr = herdr(written_prompt("idle", "claude")).await;
+    herdr.reply_once("agent.wait", wait_timeout());
+    // 短 prompt 在等待開始前就 working 又回到 idle:state_change_seq 已前進。
+    let mut snapshot = snapshot_with("idle", P6_SESSION);
+    for agent in snapshot["result"]["snapshot"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == "w1:p6" {
+            agent["state_change_seq"] = json!(PROMPT_SEQ + 2);
+        }
+    }
+    herdr.set_reply("session.snapshot", snapshot);
+
+    let reply = send(&herdr, prompt_request(json!({}))).await;
+
+    assert_eq!(reply["submit_confirmed"], true, "{reply}");
+    assert!(reply.get("enter_sent").is_none(), "{reply}");
+    assert!(!herdr.methods().contains(&"pane.send_keys".to_owned()));
+}
+
+#[tokio::test]
+async fn a_completion_since_the_prompt_also_counts_as_a_reaction() {
+    let mut prompt = written_prompt("idle", "claude");
+    prompt["result"]["agent"]["completion_seq"] = json!(10);
+    let herdr = herdr(prompt).await;
+    herdr.reply_once("agent.wait", wait_timeout());
+    let mut snapshot = snapshot_with("done", P6_SESSION);
+    for agent in snapshot["result"]["snapshot"]["agents"].as_array_mut().unwrap() {
+        if agent["pane_id"] == "w1:p6" {
+            agent["completion_seq"] = json!(11);
+        }
+    }
+    herdr.set_reply("session.snapshot", snapshot);
+
+    let reply = send(&herdr, prompt_request(json!({}))).await;
+
+    assert_eq!(reply["submit_confirmed"], true, "{reply}");
+    assert!(!herdr.methods().contains(&"pane.send_keys".to_owned()));
 }

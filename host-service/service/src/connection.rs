@@ -748,6 +748,11 @@ impl ClientConnection {
             Some("idle" | "done") => {}
             _ => return,
         }
+        // 送出後的序號基準:等待期間序號前進，代表 Agent 在我們開始等之前(或之間)已經工作過又回到 idle／done。
+        let baseline = [
+            ("state_change_seq", agent["state_change_seq"].as_u64()),
+            ("completion_seq", agent["completion_seq"].as_u64()),
+        ];
         reply.submit_confirmed = Some(false);
         match self.wait_for_reaction(pane_id, CONFIRM_WAIT).await {
             Ok(true) => {
@@ -760,12 +765,22 @@ impl ClientConnection {
         let Ok(snapshot) = self.herdr.request("session.snapshot", json!({})).await else {
             return;
         };
-        let status = snapshot["snapshot"]["agents"]
+        let current = snapshot["snapshot"]["agents"]
             .as_array()
-            .and_then(|agents| agents.iter().find(|agent| agent["pane_id"] == pane_id))
-            .and_then(|agent| agent["agent_status"].as_str());
+            .and_then(|agents| agents.iter().find(|agent| agent["pane_id"] == pane_id));
+        let status = current.and_then(|agent| agent["agent_status"].as_str());
         let session_matches = expected_session.is_none_or(|expected| pane_guard::session_of(&snapshot, pane_id).as_deref() == Some(expected));
         if !matches!(status, Some("idle" | "done")) || !session_matches {
+            return;
+        }
+        // 序號已變動:Agent 曾經工作過，prompt 已被收下，不補 Enter(避免打進新輸入或確認對話框)。沒有序號欄位時維持保守行為。
+        let advanced = current.is_some_and(|agent| {
+            baseline
+                .iter()
+                .any(|(key, before)| before.is_some_and(|before| agent[*key].as_u64().is_some_and(|now| now != before)))
+        });
+        if advanced {
+            reply.submit_confirmed = Some(true);
             return;
         }
         if self
@@ -933,11 +948,12 @@ impl ClientConnection {
         }
     }
 
-    /// Claude 的 slash 清單:只讀主機服務的家目錄(`files.home`)底下的 `.claude`,規則在 `slash_list`。
+    /// Claude 的 slash 清單:讀 `CLAUDE_CONFIG_DIR`(沒設就是家目錄 `files.home` 底下的 `.claude`),規則在 `slash_list`。
     async fn slash_list(&self, request: crate::protocol::SlashList) -> ServerMessage {
         let home = self.files.home.clone();
+        let claude_config_dir = self.transcript_environment.claude_config_dir.clone();
         let state_directory = self.files.state_directory.clone();
-        let listing = blocking(move || crate::slash_list::list(home.as_deref(), &state_directory)).await;
+        let listing = blocking(move || crate::slash_list::list(home.as_deref(), claude_config_dir.as_deref(), &state_directory)).await;
         ServerMessage::SlashListResult(crate::protocol::SlashListResult {
             request_id: request.request_id,
             commands: listing.commands,
