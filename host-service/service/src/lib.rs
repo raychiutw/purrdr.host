@@ -41,7 +41,7 @@ pub mod state_directory;
 mod structure_operations;
 mod text_format;
 pub mod transcript;
-mod transcript_reads;
+pub mod transcript_reads;
 mod transcript_session;
 pub mod update;
 pub mod update_push;
