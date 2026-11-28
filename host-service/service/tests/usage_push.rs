@@ -198,3 +198,21 @@ fn claude_usage_file_yields_readings_for_a_future_reset() {
     let readings = claude_usage_reading(home.path());
     assert_eq!(readings, vec![reading(UsageAgent::Claude, PlanUsagePeriodKind::FiveHour, 91.0, Some(resets))]);
 }
+
+#[test]
+fn a_non_2xx_response_is_not_remembered_as_delivered() {
+    for status in [400, 404, 500, 503] {
+        let home = TempDir::new().unwrap();
+        pair(home.path());
+        let mut notifier = UsageNotifier::new();
+        let mut failing = Recorder {
+            status: Some(status),
+            ..Recorder::default()
+        };
+        notifier.notify(home.path(), &mut failing, &[claude(90.0, Some(1000))]);
+        // 之後恢復正常:沒送達的門檻要重試。
+        let mut healthy = Recorder::default();
+        notifier.notify(home.path(), &mut healthy, &[claude(90.0, Some(1000))]);
+        assert_eq!(thresholds(&healthy), vec![80], "status {status}");
+    }
+}

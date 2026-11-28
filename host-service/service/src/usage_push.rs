@@ -112,8 +112,9 @@ impl UsageNotifier {
                     });
                     match transport.post_json(&pairing.endpoint, &body.to_string()) {
                         Ok(REVOKED) => pairing.remove_if_unchanged(),
-                        Ok(_) => delivered = true,
-                        Err(_) => {}
+                        // 只有 2xx 才算送達(與外掛一致);4xx/5xx、連不上都留待下次重試。
+                        Ok(200..=299) => delivered = true,
+                        Ok(_) | Err(_) => {}
                     }
                 }
                 if delivered {
