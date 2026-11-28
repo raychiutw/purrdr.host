@@ -3,6 +3,9 @@
 //! 斷言都在期限內回傳、預覽是最後一則可讀訊息、只讀檔尾需要的範圍(以讀取位元組數計)、超過上限回明確錯誤碼，
 //! 以及檔案持續寫入中邊寫邊讀的結果正確。
 
+// 測試以全域鎖序列化(讀取位元組計數器是全域的),鎖會跨 await 持有。
+#![allow(clippy::await_holding_lock)]
+
 mod support;
 
 use std::io::Write;
@@ -73,7 +76,7 @@ fn write_transcript(path: &Path, huge_tail: bool) -> u64 {
     let mut written = 0_u64;
     let mut sequence = 0_u64;
     while written < LARGE_FILE_BYTES {
-        let role = if sequence % 2 == 0 { "user" } else { "assistant" };
+        let role = if sequence.is_multiple_of(2) { "user" } else { "assistant" };
         let line = message_line(sequence, role, &format!("message {sequence}"));
         file.write_all(line.as_bytes()).unwrap();
         written += line.len() as u64;
