@@ -101,6 +101,17 @@ fn respond(mut stream: TcpStream, received: &Received, status_by_key: &StatusByK
     let _ = reader.read_exact(&mut body);
     let path = request_line.split_whitespace().nth(1).unwrap_or("/").to_owned();
     let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+    // 主機心跳(/v1/heartbeat,#99)與推播無關:不記入、不套用依密鑰設定的狀態，一律回「還需要」。
+    if path == "/v1/heartbeat" {
+        let response_body = r#"{"needed":true}"#;
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            response_body.len()
+        );
+        let _ = stream.write_all(head.as_bytes());
+        let _ = stream.write_all(response_body.as_bytes());
+        return;
+    }
     let (status, configured_body) = json["key"]
         .as_str()
         .and_then(|key| status_by_key.lock().unwrap().get(key).cloned())
