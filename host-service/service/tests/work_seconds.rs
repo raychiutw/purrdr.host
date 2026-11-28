@@ -64,6 +64,17 @@ fn an_earlier_finish_time_than_the_start_reports_nothing() {
 }
 
 #[test]
+fn work_time_ends_when_the_pane_becomes_blocked_so_done_after_blocked_reports_nothing() {
+    // 與外掛一致:blocked 是一段工作的結束,等使用者的時間不算進去。
+    let start = Instant::now();
+    let mut detector = detector();
+    detector.status("w1:pA", "working", start);
+    detector.status("w1:pA", "blocked", start + MINUTE);
+
+    assert_eq!(detector.finish_work("w1:pA", start + 30 * MINUTE), None);
+}
+
+#[test]
 fn work_time_restarts_when_a_blocked_pane_resumes_and_clears_when_it_goes_idle() {
     let start = Instant::now();
     let mut detector = detector();

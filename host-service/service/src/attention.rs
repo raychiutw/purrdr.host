@@ -32,7 +32,7 @@ pub struct AttentionDetector {
     pub stuck_after: Duration,
     pub reminder_after: Duration,
     periods: BTreeMap<String, Period>,
-    /// 各 pane 最近一次(由事件得知)進入 working 的時間,供 done 推播算 `workSeconds`(raychiutw/purrdr.host#96);只存在記憶體,重啟後為空。
+    /// 各 pane 最近一次(由事件得知)進入 working 的時間(進入 blocked／idle／done 即清掉),供 done 推播算 `workSeconds`(raychiutw/purrdr.host#96);只存在記憶體,重啟後為空。
     working_since: BTreeMap<String, Instant>,
 }
 
@@ -58,7 +58,8 @@ impl AttentionDetector {
     }
 
     fn update(&mut self, pane_id: &str, status: &str, now: Instant, from_event: bool) {
-        if matches!(status, "idle" | "done") {
+        // 與外掛一致:blocked 也是一段工作的結束(等使用者的時間不算工作),done 前若是 blocked 就不帶 workSeconds。
+        if matches!(status, "idle" | "done" | "blocked") {
             self.working_since.remove(pane_id);
         }
         if self.periods.get(pane_id).is_some_and(|period| period.status == status) {
