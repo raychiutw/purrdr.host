@@ -410,6 +410,7 @@ impl ClientConnection {
             ClientMessage::FileStat(request) => self.file_stat(request, device).await,
             ClientMessage::FileRead(request) => self.file_read(request, device).await,
             ClientMessage::DirectoryList(request) => self.directory_list(request).await,
+            ClientMessage::SlashList(request) => self.slash_list(request).await,
             ClientMessage::PushStatus(request) => push_reply(request.request_id, self.push.status(&request.device_id).await, PushState::status_result),
             ClientMessage::PushInstall(request) => {
                 let outcome = self.push.pair(&request.device_id, &request.pairing).await;
@@ -930,6 +931,19 @@ impl ClientConnection {
             ),
             Err(ListError::Unreadable) => error(Some(request.request_id), ErrorCode::DirectoryUnreadable, "cannot read this folder"),
         }
+    }
+
+    /// Claude 的 slash 清單:只讀主機服務的家目錄(`files.home`)底下的 `.claude`,規則在 `slash_list`。
+    async fn slash_list(&self, request: crate::protocol::SlashList) -> ServerMessage {
+        let home = self.files.home.clone();
+        let state_directory = self.files.state_directory.clone();
+        let listing = blocking(move || crate::slash_list::list(home.as_deref(), &state_directory)).await;
+        ServerMessage::SlashListResult(crate::protocol::SlashListResult {
+            request_id: request.request_id,
+            commands: listing.commands,
+            disabled_plugins: listing.disabled_plugins,
+            truncated: listing.truncated,
+        })
     }
 
     async fn file_stat(&mut self, request: FileStat, device: &Device) -> ServerMessage {

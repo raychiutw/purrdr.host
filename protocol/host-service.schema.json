@@ -51,6 +51,7 @@
         { "$ref": "#/$defs/FileStat" },
         { "$ref": "#/$defs/FileRead" },
         { "$ref": "#/$defs/DirectoryList" },
+        { "$ref": "#/$defs/SlashList" },
         { "$ref": "#/$defs/PushStatus" },
         { "$ref": "#/$defs/PushInstall" },
         { "$ref": "#/$defs/PushRemove" },
@@ -113,6 +114,7 @@
         { "$ref": "#/$defs/PaneTerminalClosed" },
         { "$ref": "#/$defs/FileStatResult" },
         { "$ref": "#/$defs/DirectoryListResult" },
+        { "$ref": "#/$defs/SlashListResult" },
         { "$ref": "#/$defs/FileReadResult" },
         { "$ref": "#/$defs/PushStatusResult" },
         { "$ref": "#/$defs/PushInstallResult" },
@@ -1345,6 +1347,39 @@
         "truncated": { "type": "boolean", "description": "子資料夾多於上限，directories 只含排序後的前面一段。" }
       },
       "required": ["type", "request_id", "path", "directories", "truncated"]
+    },
+    "SlashList": {
+      "description": "Claude 的 slash 清單(raychiutw/purrdr.host#106):給 HTTPS 主機的 slash 選單,對應 app 的 SlashMenuSource(SSH 主機由 app 自己讀 ~/.claude)。主機服務只讀這台主機使用者家目錄的 .claude(不執行任何指令):使用者層的 skills 與 commands、已安裝且啟用的 plugin 的 skills 與 commands(依 plugin.json 宣告的路徑,沒宣告才用預設 skills/、commands/)。只取 frontmatter 的名稱、說明與參數提示,不回檔案內容。內建指令與專案層(cwd)不在這裡,由 app 處理。唯讀，唯讀裝置也可用。沒有家目錄或沒有 .claude 回空清單(不是錯誤)。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "slash.list" },
+        "request_id": { "type": "string" }
+      },
+      "required": ["type", "request_id"]
+    },
+    "SlashListResult": {
+      "description": "Claude 的 slash 清單。commands 先使用者層、後 plugin(依 plugin 名稱),各組內依名稱排序;同名只留使用者層。最多 2000 筆,更多或掃描量達上限時 truncated 為 true。settings.json 的 enabledPlugins 為 false 的 plugin 不列指令,名稱放在 disabled_plugins(依名稱排序)。",
+      "type": "object",
+      "properties": {
+        "type": { "const": "slash.list.result" },
+        "request_id": { "type": "string" },
+        "commands": { "type": "array", "items": { "$ref": "#/$defs/SlashCommandEntry" } },
+        "disabled_plugins": { "type": "array", "items": { "type": "string" }, "description": "已安裝但 enabledPlugins 設成 false 的 plugin 名稱(取自 installed_plugins.json 的 <名稱>@<marketplace>)。" },
+        "truncated": { "type": "boolean" }
+      },
+      "required": ["type", "request_id", "commands", "disabled_plugins", "truncated"]
+    },
+    "SlashCommandEntry": {
+      "description": "一個 slash 指令(不含開頭的 /)。skill 的名稱取 frontmatter 的 name(沒有時用資料夾名);指令的名稱是相對 commands 資料夾的路徑,/ 換成 :(db/migrate.md 是 db:migrate);plugin 的前面加 <plugin>:。frontmatter 的 user-invocable 為 false 的不列。",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "argument_hint": { "type": "string", "description": "frontmatter 的 argument-hint;沒有時省略。" },
+        "summary": { "type": "string", "description": "frontmatter 的 description(最多 500 字元);沒有時為空字串。" },
+        "source": { "type": "string", "enum": ["user", "plugin"], "description": "user:~/.claude/skills 或 commands;plugin:已啟用的 plugin。" },
+        "plugin": { "type": "string", "description": "source 是 plugin 時的 plugin 名稱(取自 plugin.json,沒有時取安裝名稱)。" }
+      },
+      "required": ["name", "summary", "source"]
     },
     "FileStat": {
       "description": "主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。",
