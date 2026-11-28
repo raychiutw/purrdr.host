@@ -2,13 +2,14 @@
 //! 例外只有本機的安裝指令(#62)執行 tailscale、launchctl 等固定程式(`install/system.rs`),
 //! Pane 終端機(#61)以子行程執行 `herdr terminal session control|observe`(`pane_terminal.rs`),
 //! 以及推播外掛代裝(raychiutw/purrdr.ios#261)執行 `herdr plugin list|install|uninstall`(`push_plugin.rs`)、
-//! Codex 方案用量(raychiutw/purrdr.host#62)執行 `codex app-server`(`codex_usage.rs`)。都是固定的指令，參數不來自 app。
+//! Codex 方案用量(raychiutw/purrdr.host#62)執行 `codex app-server`(`codex_usage.rs`)、
+//! Windows 看門狗(raychiutw/purrdr.host#112)以自己的執行檔加固定旗標啟動子程序(`supervisor.rs`)。都是固定的指令，參數不來自 app。
 
 use std::path::{Path, PathBuf};
 
 const FORBIDDEN: [&str; 5] = ["remote-api-bridge", "std::process::Command", "tokio::process", "Command::new", "process::Stdio"];
 /// 可以執行子行程的檔案(相對 `src/`)。
-const PROCESS_ALLOWED: [&str; 4] = ["codex_usage.rs", "install/system.rs", "pane_terminal.rs", "push_plugin.rs"];
+const PROCESS_ALLOWED: [&str; 5] = ["codex_usage.rs", "install/system.rs", "pane_terminal.rs", "push_plugin.rs", "supervisor.rs"];
 
 fn rust_files(directory: &Path, files: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(directory).unwrap() {
@@ -96,4 +97,17 @@ fn codex_usage_only_runs_codex_app_server() {
     assert_eq!(source.matches(".arg(").count(), 1, "唯一的參數是 app-server");
     assert!(source.contains(r#".arg("app-server")"#));
     assert!(source.contains(".args(&cli.program_arguments)"), "其他參數只有測試的假 codex 用的固定參數");
+}
+
+#[test]
+fn supervisor_only_relaunches_its_own_executable() {
+    let source = std::fs::read_to_string(source_directory().join("supervisor.rs")).unwrap();
+
+    assert_eq!(source.matches("Command::new(").count(), 1, "只能有一個子行程");
+    assert!(source.contains("Command::new(&self.executable)"));
+    assert_eq!(source.matches("std::env::current_exe()").count(), 1, "子程序的執行檔只能來自 current_exe()");
+    assert!(
+        source.contains(".map(|executable| (directory, executable))"),
+        "current_exe() 的結果直接成為子程序的執行檔"
+    );
 }

@@ -181,6 +181,8 @@ pub struct SystemState {
     pub background_processes: Vec<Vec<String>>,
     /// Windows 使用者層級 PATH(`HKCU\Environment` 的 `Path`);None 表示沒有這個值。
     pub user_path: Option<String>,
+    /// 新程序啟動時 `running.json` 還留著上一個程序的記載的次數(真的服務會因此記「上次未正常關閉」)。
+    pub stale_marker_starts: u32,
 }
 
 /// 另一個工具已經用 `tailscale serve` 占用的 HTTPS 埠(例如 Allymote 的 443)。
@@ -211,6 +213,12 @@ pub struct FakeSystem {
     /// 還沒卸載完的 job 與剩餘的 `print` 次數。
     pub unloading: Option<(String, u32)>,
     pub commands: Vec<String>,
+    /// 每次 taskkill 執行當下,看門狗的停止標記(`stop-requested`)是否已存在。
+    pub stop_marker_at_taskkill: Vec<bool>,
+    /// taskkill 之後舊程序還要這麼多次 `process_exists` 檢查才真的消失(`taskkill /F` 不等程序真的死)。
+    pub lingering_checks: u32,
+    /// 每次 `process_exists` 被問到的 pid,以及當時停止標記是否還在。
+    pub process_checks: Vec<(u32, bool)>,
     /// 等行程結束後才刪的資料夾(fake 會立刻刪)。
     pub deferred_removals: Vec<PathBuf>,
     /// 假主機服務啟動時在 127.0.0.1 聽的埠;None 表示不聽(安裝測試的執行檔不是假主機服務)。
@@ -243,6 +251,9 @@ impl FakeSystem {
             bootout_lag: 0,
             unloading: None,
             commands: Vec::new(),
+            stop_marker_at_taskkill: Vec::new(),
+            lingering_checks: 0,
+            process_checks: Vec::new(),
             deferred_removals: Vec::new(),
             service_port: None,
             service_listener: None,
@@ -262,7 +273,11 @@ impl FakeSystem {
         };
         let started_at = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
         let marker = json!({"version": version, "port": self.service_port, "pid": 4242, "started_at_ms": started_at});
-        std::fs::write(self.home.join(".purrdr/host-service/running.json"), marker.to_string()).unwrap();
+        let marker_file = self.home.join(".purrdr/host-service/running.json");
+        if marker_file.exists() {
+            self.state.stale_marker_starts += 1;
+        }
+        std::fs::write(marker_file, marker.to_string()).unwrap();
         if let Some(port) = self.service_port {
             self.service_listener = Some(TcpListener::bind(("127.0.0.1", port)).expect("假主機服務的埠被占用"));
         }
@@ -444,6 +459,8 @@ impl FakeSystem {
                     return failed("Unit not found\n");
                 }
                 self.stop_service();
+                // SIGTERM 讓真的服務走正常關閉並清掉自己的 running.json。
+                let _ = std::fs::remove_file(self.home.join(".purrdr/host-service/running.json"));
                 self.start_service(&self.installed_executable());
                 self.state.systemd_active.insert((*unit).into());
                 ok("")
@@ -492,6 +509,8 @@ impl FakeSystem {
         match arguments.as_slice() {
             ["/F", "/IM", image, "/FI", filter] => {
                 assert_eq!(*filter, "USERNAME eq demo");
+                self.stop_marker_at_taskkill
+                    .push(self.home.join(".purrdr/host-service/stop-requested").exists());
                 self.stop_service();
                 let before = self.state.background_processes.len();
                 self.state
@@ -570,6 +589,15 @@ impl HostSystem for FakeSystem {
         self.state.background_processes.push(process);
         self.start_service(Path::new(program));
         Ok(())
+    }
+
+    fn process_exists(&mut self, pid: u32) -> bool {
+        self.process_checks.push((pid, self.home.join(".purrdr/host-service/stop-requested").exists()));
+        if self.lingering_checks > 0 {
+            self.lingering_checks -= 1;
+            return true;
+        }
+        false
     }
 
     fn user_path(&mut self) -> std::io::Result<Option<String>> {

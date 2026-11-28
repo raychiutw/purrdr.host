@@ -74,6 +74,8 @@ pub enum HerdrStatus {
 pub struct HostStatus {
     pub installed: bool,
     pub autostart_registered: bool,
+    /// 程序消失後怎麼被帶回來(Windows 看門狗);由系統重啟的平台或沒有登記時 None。
+    pub auto_restart: Option<String>,
     /// 127.0.0.1 上的埠有主機服務在聽。
     pub listening: bool,
     pub port: u16,
@@ -94,6 +96,9 @@ impl std::fmt::Display for HostStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
+        if let Some(note) = &self.auto_restart {
+            writeln!(formatter, "  auto restart: {note}")?;
+        }
         if let Some(auto_update) = self.auto_update {
             writeln!(formatter, "  auto update: {}", settings::on_off(auto_update))?;
         }
@@ -1159,10 +1164,12 @@ impl<S: HostSystem> Installer<S> {
             };
         let session = record.as_ref().and_then(|record| record.herdr_session.clone());
         let listening = is_listening(port).await;
+        let autostart_registered = autostart::is_registered(&mut self.system, &layout);
         let auto_update_setting = record.as_ref().map(|record| record.auto_update);
         HostStatus {
             installed: record.is_some(),
-            autostart_registered: autostart::is_registered(&mut self.system, &layout),
+            autostart_registered,
+            auto_restart: autostart_registered.then(|| autostart::auto_restart_note(&layout)).flatten(),
             listening,
             port,
             https_port,
