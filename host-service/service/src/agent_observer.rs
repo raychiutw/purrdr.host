@@ -547,7 +547,7 @@ async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str,
                 && newly_paused
                 && let Some(home) = home
             {
-                push(herdr, home, pane_id, "queue_paused").await;
+                push(herdr, home, pane_id, "queue_paused", None).await;
             }
             return;
         }
