@@ -213,6 +213,8 @@ pub struct FakeSystem {
     /// 還沒卸載完的 job 與剩餘的 `print` 次數。
     pub unloading: Option<(String, u32)>,
     pub commands: Vec<String>,
+    /// 每次 taskkill 執行當下,看門狗的停止標記(`stop-requested`)是否已存在。
+    pub stop_marker_at_taskkill: Vec<bool>,
     /// 等行程結束後才刪的資料夾(fake 會立刻刪)。
     pub deferred_removals: Vec<PathBuf>,
     /// 假主機服務啟動時在 127.0.0.1 聽的埠;None 表示不聽(安裝測試的執行檔不是假主機服務)。
@@ -245,6 +247,7 @@ impl FakeSystem {
             bootout_lag: 0,
             unloading: None,
             commands: Vec::new(),
+            stop_marker_at_taskkill: Vec::new(),
             deferred_removals: Vec::new(),
             service_port: None,
             service_listener: None,
@@ -500,6 +503,8 @@ impl FakeSystem {
         match arguments.as_slice() {
             ["/F", "/IM", image, "/FI", filter] => {
                 assert_eq!(*filter, "USERNAME eq demo");
+                self.stop_marker_at_taskkill
+                    .push(self.home.join(".purrdr/host-service/stop-requested").exists());
                 self.stop_service();
                 let before = self.state.background_processes.len();
                 self.state

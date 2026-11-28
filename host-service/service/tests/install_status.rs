@@ -114,3 +114,19 @@ async fn status_reports_the_https_port_in_use() {
     assert!(report.contains(&format!("HTTPS address: https://{FQDN}:8443")), "{report}");
     assert!(report.contains(&format!("tailscale serve: HTTPS 8443 -> http://127.0.0.1:{port}")), "{report}");
 }
+
+#[tokio::test]
+async fn status_reports_the_windows_watchdog_only_where_it_exists() {
+    for platform in PLATFORMS {
+        let host = TestHost::new(platform);
+        let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+        installer.install(&host.options(reserved_port()), |_| true).unwrap();
+
+        let status = installer.status(&socket_environment_at("purrdr-status-test-missing-socket")).await;
+
+        let has_line = status
+            .to_string()
+            .contains("  auto restart: watchdog (restarts the service if it disappears)\n");
+        assert_eq!(has_line, platform == InstallPlatform::Windows, "{platform:?}: {status}");
+    }
+}
