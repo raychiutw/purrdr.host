@@ -6,6 +6,7 @@ Purrdr 的主機外掛：裝在主機的 [herdr](https://herdr.dev) 上，Agent 
 - 配對資料在 `~/.purrdr/push-<裝置>/pairing`(每支配對的裝置一個資料夾，只有本人可讀)。
 - 推播只帶 workspace 名稱、狀態、pane id 與選用的 `tab`(Tab 名稱;沒有就用該 Pane 的 Agent 名稱，都沒有就省略,最長 100 字元),**不帶任何對話內容或終端機標題**;推播的文字由 Purrdr 後台組成。配對密鑰只在主機與 app 上，後台只保存它的雜湊。
 - macOS／Linux 用 `sh` + `curl`(`notify.sh`);Windows 用 PowerShell(`notify.ps1`)。herdr 的 plugin 在 Windows 仍是 preview,Windows 推播是 best-effort。
+- 完成的推播多帶選用的 `workSeconds`(工作秒數):外掛在 Agent 進入 working 時把開始時間記在 `~/.purrdr/plugin-state/`(Windows 是 `%USERPROFILE%\.purrdr\plugin-state\`),完成時算出秒數;算不出來(重啟後沒有開始時間、事件亂序…)就省略。另外每次 Agent 狀態改變時讀 Claude 的 status line 用量檔(`~/.purrdr/claude-usage/usage.json`),方案用量跨過 80%／95% 就送一則 `usage` 推播(不帶 workspace、pane、tab;同一週期同一門檻只送一次)。主機服務在跑時這兩項由它送,外掛讓位。
 - 沒有常駐程序：herdr 在 `pane.agent_status_changed` 時才執行腳本，執行完就結束。
 
 ## 檔案
