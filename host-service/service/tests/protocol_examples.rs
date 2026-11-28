@@ -91,6 +91,14 @@ fn decoded_examples_carry_their_values() {
     assert_eq!(tabs[0].label, "purrdr.ios");
     assert_eq!(tabs[2].workspace_id, "w2");
 
+    let slash: ServerMessage = serde_json::from_str(include_str!("../../../protocol/examples/server.slash-list-result.json")).unwrap();
+    let ServerMessage::SlashListResult(slash) = slash else {
+        panic!("不是 slash.list.result")
+    };
+    assert_eq!(slash.commands[2].plugin.as_deref(), Some("mattpocock-skills"));
+    assert_eq!(slash.commands[0].argument_hint.as_deref(), Some("<environment>"));
+    assert_eq!(slash.disabled_plugins, ["frontend-design"]);
+
     let error: ServerMessage = serde_json::from_str(include_str!("../../../protocol/examples/server.error.invalid-message.json")).unwrap();
     let ServerMessage::ErrorMessage(error) = error else { panic!("不是 error") };
     assert_eq!(error.code, ErrorCode::InvalidMessage);
@@ -146,4 +154,5 @@ fn only_write_messages_are_marked_as_write() {
     assert!(decode("client.file-upload-chunk.json").is_write());
     assert!(decode("client.devices-revoke.json").is_write());
     assert!(!decode("client.devices-list.json").is_write());
+    assert!(!decode("client.slash-list.json").is_write());
 }

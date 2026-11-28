@@ -70,6 +70,8 @@ pub enum ClientMessage {
     FileRead(FileRead),
     #[serde(rename = "directory.list")]
     DirectoryList(DirectoryList),
+    #[serde(rename = "slash.list")]
+    SlashList(SlashList),
     #[serde(rename = "push.status")]
     PushStatus(PushStatus),
     #[serde(rename = "push.install")]
@@ -197,6 +199,8 @@ pub enum ServerMessage {
     FileStatResult(FileStatResult),
     #[serde(rename = "directory.list.result")]
     DirectoryListResult(DirectoryListResult),
+    #[serde(rename = "slash.list.result")]
+    SlashListResult(SlashListResult),
     #[serde(rename = "file.read.result")]
     FileReadResult(FileReadResult),
     #[serde(rename = "push.status.result")]
@@ -1293,6 +1297,38 @@ pub struct DirectoryListResult {
     pub directories: Vec<String>,
     /// 子資料夾多於上限，directories 只含排序後的前面一段。
     pub truncated: bool,
+}
+
+/// Claude 的 slash 清單(raychiutw/purrdr.host#106):給 HTTPS 主機的 slash 選單,對應 app 的 SlashMenuSource(SSH 主機由 app 自己讀 ~/.claude)。主機服務只讀這台主機使用者家目錄的 .claude(不執行任何指令):使用者層的 skills 與 commands、已安裝且啟用的 plugin 的 skills 與 commands(依 plugin.json 宣告的路徑,沒宣告才用預設 skills/、commands/)。只取 frontmatter 的名稱、說明與參數提示,不回檔案內容。內建指令與專案層(cwd)不在這裡,由 app 處理。唯讀，唯讀裝置也可用。沒有家目錄或沒有 .claude 回空清單(不是錯誤)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlashList {
+    pub request_id: String,
+}
+
+/// Claude 的 slash 清單。commands 先使用者層、後 plugin(依 plugin 名稱),各組內依名稱排序;同名只留使用者層。最多 2000 筆,更多或掃描量達上限時 truncated 為 true。settings.json 的 enabledPlugins 為 false 的 plugin 不列指令,名稱放在 disabled_plugins(依名稱排序)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlashListResult {
+    pub request_id: String,
+    pub commands: Vec<SlashCommandEntry>,
+    /// 已安裝但 enabledPlugins 設成 false 的 plugin 名稱(取自 installed_plugins.json 的 <名稱>@<marketplace>)。
+    pub disabled_plugins: Vec<String>,
+    pub truncated: bool,
+}
+
+/// 一個 slash 指令(不含開頭的 /)。skill 的名稱取 frontmatter 的 name(沒有時用資料夾名);指令的名稱是相對 commands 資料夾的路徑,/ 換成 :(db/migrate.md 是 db:migrate);plugin 的前面加 <plugin>:。frontmatter 的 user-invocable 為 false 的不列。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SlashCommandEntry {
+    pub name: String,
+    /// frontmatter 的 argument-hint;沒有時省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub argument_hint: Option<String>,
+    /// frontmatter 的 description(最多 500 字元);沒有時為空字串。
+    pub summary: String,
+    /// user:~/.claude/skills 或 commands;plugin:已啟用的 plugin。
+    pub source: String,
+    /// source 是 plugin 時的 plugin 名稱(取自 plugin.json,沒有時取安裝名稱)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<String>,
 }
 
 /// 主機取檔(raychiutw/purrdr.ios#227):查檔案狀態。只允許 herdr snapshot 目前回報的 Agent 工作目錄之下，或這條連線定位過的對話紀錄裡出現的路徑;主機服務解析 symlink 後再比對工作目錄與排除清單(x-excluded-file-locations)。唯讀，唯讀裝置也可用。

@@ -44,6 +44,7 @@ extension HostServiceProtocol {
         case fileStat(FileStat)
         case fileRead(FileRead)
         case directoryList(DirectoryList)
+        case slashList(SlashList)
         case pushStatus(PushStatus)
         case pushInstall(PushInstall)
         case pushRemove(PushRemove)
@@ -110,6 +111,7 @@ extension HostServiceProtocol {
             case "file.stat": self = .fileStat(try FileStat(from: decoder))
             case "file.read": self = .fileRead(try FileRead(from: decoder))
             case "directory.list": self = .directoryList(try DirectoryList(from: decoder))
+            case "slash.list": self = .slashList(try SlashList(from: decoder))
             case "push.status": self = .pushStatus(try PushStatus(from: decoder))
             case "push.install": self = .pushInstall(try PushInstall(from: decoder))
             case "push.remove": self = .pushRemove(try PushRemove(from: decoder))
@@ -220,6 +222,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .directoryList(let message):
                 try container.encode("directory.list", forKey: .type)
+                try message.encode(to: encoder)
+            case .slashList(let message):
+                try container.encode("slash.list", forKey: .type)
                 try message.encode(to: encoder)
             case .pushStatus(let message):
                 try container.encode("push.status", forKey: .type)
@@ -362,6 +367,7 @@ extension HostServiceProtocol {
         case paneTerminalClosed(PaneTerminalClosed)
         case fileStatResult(FileStatResult)
         case directoryListResult(DirectoryListResult)
+        case slashListResult(SlashListResult)
         case fileReadResult(FileReadResult)
         case pushStatusResult(PushStatusResult)
         case pushInstallResult(PushInstallResult)
@@ -431,6 +437,7 @@ extension HostServiceProtocol {
             case "pane.terminal.closed": self = .paneTerminalClosed(try PaneTerminalClosed(from: decoder))
             case "file.stat.result": self = .fileStatResult(try FileStatResult(from: decoder))
             case "directory.list.result": self = .directoryListResult(try DirectoryListResult(from: decoder))
+            case "slash.list.result": self = .slashListResult(try SlashListResult(from: decoder))
             case "file.read.result": self = .fileReadResult(try FileReadResult(from: decoder))
             case "push.status.result": self = .pushStatusResult(try PushStatusResult(from: decoder))
             case "push.install.result": self = .pushInstallResult(try PushInstallResult(from: decoder))
@@ -544,6 +551,9 @@ extension HostServiceProtocol {
                 try message.encode(to: encoder)
             case .directoryListResult(let message):
                 try container.encode("directory.list.result", forKey: .type)
+                try message.encode(to: encoder)
+            case .slashListResult(let message):
+                try container.encode("slash.list.result", forKey: .type)
                 try message.encode(to: encoder)
             case .fileReadResult(let message):
                 try container.encode("file.read.result", forKey: .type)
@@ -2810,6 +2820,77 @@ extension HostServiceProtocol {
             case path
             case directories
             case truncated
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// Claude 的 slash 清單(raychiutw/purrdr.host#106):給 HTTPS 主機的 slash 選單,對應 app 的 SlashMenuSource(SSH 主機由 app 自己讀 ~/.claude)。主機服務只讀這台主機使用者家目錄的 .claude(不執行任何指令):使用者層的 skills 與 commands、已安裝且啟用的 plugin 的 skills 與 commands(依 plugin.json 宣告的路徑,沒宣告才用預設 skills/、commands/)。只取 frontmatter 的名稱、說明與參數提示,不回檔案內容。內建指令與專案層(cwd)不在這裡,由 app 處理。唯讀，唯讀裝置也可用。沒有家目錄或沒有 .claude 回空清單(不是錯誤)。
+    public struct SlashList: Codable, Sendable, Equatable {
+        public var requestId: String
+
+        public init(requestId: String) {
+            self.requestId = requestId
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// Claude 的 slash 清單。commands 先使用者層、後 plugin(依 plugin 名稱),各組內依名稱排序;同名只留使用者層。最多 2000 筆,更多或掃描量達上限時 truncated 為 true。settings.json 的 enabledPlugins 為 false 的 plugin 不列指令,名稱放在 disabled_plugins(依名稱排序)。
+    public struct SlashListResult: Codable, Sendable, Equatable {
+        public var requestId: String
+        public var commands: [SlashCommandEntry]
+        /// 已安裝但 enabledPlugins 設成 false 的 plugin 名稱(取自 installed_plugins.json 的 <名稱>@<marketplace>)。
+        public var disabledPlugins: [String]
+        public var truncated: Bool
+
+        public init(requestId: String, commands: [SlashCommandEntry], disabledPlugins: [String], truncated: Bool) {
+            self.requestId = requestId
+            self.commands = commands
+            self.disabledPlugins = disabledPlugins
+            self.truncated = truncated
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case requestId = "request_id"
+            case commands
+            case disabledPlugins = "disabled_plugins"
+            case truncated
+        }
+    }
+}
+
+extension HostServiceProtocol {
+    /// 一個 slash 指令(不含開頭的 /)。skill 的名稱取 frontmatter 的 name(沒有時用資料夾名);指令的名稱是相對 commands 資料夾的路徑,/ 換成 :(db/migrate.md 是 db:migrate);plugin 的前面加 <plugin>:。frontmatter 的 user-invocable 為 false 的不列。
+    public struct SlashCommandEntry: Codable, Sendable, Equatable {
+        public var name: String
+        /// frontmatter 的 argument-hint;沒有時省略。
+        public var argumentHint: String?
+        /// frontmatter 的 description(最多 500 字元);沒有時為空字串。
+        public var summary: String
+        /// user:~/.claude/skills 或 commands;plugin:已啟用的 plugin。
+        public var source: String
+        /// source 是 plugin 時的 plugin 名稱(取自 plugin.json,沒有時取安裝名稱)。
+        public var plugin: String?
+
+        public init(name: String, argumentHint: String? = nil, summary: String, source: String, plugin: String? = nil) {
+            self.name = name
+            self.argumentHint = argumentHint
+            self.summary = summary
+            self.source = source
+            self.plugin = plugin
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case name
+            case argumentHint = "argument_hint"
+            case summary
+            case source
+            case plugin
         }
     }
 }
