@@ -215,6 +215,10 @@ pub struct FakeSystem {
     pub commands: Vec<String>,
     /// 每次 taskkill 執行當下,看門狗的停止標記(`stop-requested`)是否已存在。
     pub stop_marker_at_taskkill: Vec<bool>,
+    /// taskkill 之後舊程序還要這麼多次 `process_exists` 檢查才真的消失(`taskkill /F` 不等程序真的死)。
+    pub lingering_checks: u32,
+    /// 每次 `process_exists` 被問到的 pid,以及當時停止標記是否還在。
+    pub process_checks: Vec<(u32, bool)>,
     /// 等行程結束後才刪的資料夾(fake 會立刻刪)。
     pub deferred_removals: Vec<PathBuf>,
     /// 假主機服務啟動時在 127.0.0.1 聽的埠;None 表示不聽(安裝測試的執行檔不是假主機服務)。
@@ -248,6 +252,8 @@ impl FakeSystem {
             unloading: None,
             commands: Vec::new(),
             stop_marker_at_taskkill: Vec::new(),
+            lingering_checks: 0,
+            process_checks: Vec::new(),
             deferred_removals: Vec::new(),
             service_port: None,
             service_listener: None,
@@ -583,6 +589,15 @@ impl HostSystem for FakeSystem {
         self.state.background_processes.push(process);
         self.start_service(Path::new(program));
         Ok(())
+    }
+
+    fn process_exists(&mut self, pid: u32) -> bool {
+        self.process_checks.push((pid, self.home.join(".purrdr/host-service/stop-requested").exists()));
+        if self.lingering_checks > 0 {
+            self.lingering_checks -= 1;
+            return true;
+        }
+        false
     }
 
     fn user_path(&mut self) -> std::io::Result<Option<String>> {

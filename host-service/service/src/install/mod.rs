@@ -75,7 +75,7 @@ pub struct HostStatus {
     pub installed: bool,
     pub autostart_registered: bool,
     /// 程序消失後怎麼被帶回來(Windows 看門狗);由系統重啟的平台或沒有登記時 None。
-    pub auto_restart: Option<&'static str>,
+    pub auto_restart: Option<String>,
     /// 127.0.0.1 上的埠有主機服務在聽。
     pub listening: bool,
     pub port: u16,
@@ -96,7 +96,7 @@ impl std::fmt::Display for HostStatus {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         writeln!(formatter, "host service: {}", if self.installed { "installed" } else { "not installed" })?;
         writeln!(formatter, "  starts at login: {}", yes_no(self.autostart_registered))?;
-        if let Some(note) = self.auto_restart {
+        if let Some(note) = &self.auto_restart {
             writeln!(formatter, "  auto restart: {note}")?;
         }
         if let Some(auto_update) = self.auto_update {

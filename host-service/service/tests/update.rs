@@ -810,6 +810,21 @@ fn an_intentional_restart_is_not_left_looking_like_a_crash() {
 }
 
 #[test]
+fn a_failed_macos_kickstart_leaves_running_json_so_a_later_crash_is_still_detected() {
+    let mut installed = InstalledHost::new(InstallPlatform::MacOs);
+    let marker = installed.host.service_directory().join("running.json");
+    assert!(marker.is_file(), "安裝後服務要寫了 running.json");
+    installed.system.as_mut().unwrap().autostart_fails = true;
+    let server = FakeReleaseServer::start();
+    publish(&server, InstallPlatform::MacOs, "0.5.1", "");
+    let mut updater = installed.updater(&server);
+
+    assert!(updater.apply().is_err());
+
+    assert!(marker.is_file(), "kickstart 失敗、舊服務還在跑,running.json 不能被刪掉");
+}
+
+#[test]
 fn only_one_update_runs_at_a_time() {
     let mut installed = InstalledHost::new(InstallPlatform::Linux);
     let mut other_update = installed.another_location();

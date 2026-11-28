@@ -84,16 +84,21 @@ pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, serv
             // `kickstart -k` 是強制結束,服務記不到關閉紀錄。這是有意的重啟,不是當機:先清掉 running.json,
             // 新程序才不會誤報「上次未正常關閉」(真正被強制結束的仍由啟動偵測補上)。
             // Linux 的 `systemctl restart` 送 SIGTERM,服務走正常關閉自己清,不需處理。
-            crate::running_service::remove(&layout.directory());
-            run_checked(
+            // kickstart 失敗時舊服務還在跑:把記載放回去,之後真的當機才偵測得到。
+            let previous = crate::running_service::take(&layout.directory());
+            let result = run_checked(
                 system,
                 "launchctl",
                 &["kickstart".into(), "-k".into(), format!("{domain}/{LAUNCH_AGENT_LABEL}")],
-            )
+            );
+            if let (Err(_), Some(previous)) = (&result, &previous) {
+                crate::running_service::restore(&layout.directory(), previous);
+            }
+            result
         }
         InstallPlatform::Linux => run_checked(system, "systemctl", &arguments(&["--user", "restart", SYSTEMD_UNIT])),
         InstallPlatform::Windows => {
-            stop_windows_background(system, layout, user_name);
+            stop_windows_background(system, layout, user_name)?;
             crate::supervisor::clear_stop(&layout.directory());
             let background = layout.background_executable().display().to_string();
             system
@@ -103,18 +108,47 @@ pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, serv
     }
 }
 
+/// 停止要求之後等舊程序結束的輪詢間隔與次數(合計約 5 秒)。
+const EXIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+const EXIT_POLL_LIMIT: u32 = 50;
+
 /// 只結束這個使用者的背景執行檔(看門狗與它的子程序同映像名,一起結束)。
 /// 先留下停止要求,看門狗才不會在兩者被結束的空窗把服務重啟起來(#112);要再啟動時由呼叫端清掉。
-fn stop_windows_background(system: &mut impl HostSystem, layout: &ServiceLayout, user_name: Option<&str>) {
-    crate::supervisor::request_stop(&layout.directory());
+/// 標記寫不下去就不結束(看門狗會把舊服務拉回來),回錯誤;`taskkill /F` 不等程序真的死,
+/// 所以再等看門狗與服務的程序都消失才返回,呼叫端才能放心清掉標記;等不到也回錯誤。
+fn stop_windows_background(system: &mut impl HostSystem, layout: &ServiceLayout, user_name: Option<&str>) -> Result<(), InstallError> {
+    let directory = layout.directory();
+    crate::supervisor::request_stop(&directory).map_err(|error| {
+        InstallError::Autostart(format!(
+            "cannot ask the watchdog not to restart the service ({error}); the service was not stopped"
+        ))
+    })?;
+    let pids: Vec<u32> = crate::supervisor::read_watchdog(&directory)
+        .map(|watchdog| watchdog.pid)
+        .into_iter()
+        .chain(crate::running_service::read(&directory).map(|running| running.pid))
+        .collect();
     let mut taskkill = arguments(&["/F", "/IM", layout.background_executable_name()]);
     if let Some(user_name) = user_name {
         taskkill.extend(["/FI".to_owned(), format!("USERNAME eq {user_name}")]);
     }
     let _ = system.run("taskkill", &taskkill);
+    let gone = crate::supervisor::wait_until_gone(
+        || pids.iter().any(|pid| system.process_exists(*pid)),
+        std::thread::sleep,
+        EXIT_POLL_INTERVAL,
+        EXIT_POLL_LIMIT,
+    );
+    if !gone {
+        return Err(InstallError::Autostart(
+            "the previous host service is still running after it was asked to stop; end it in Task Manager and try again".to_owned(),
+        ));
+    }
+    crate::supervisor::remove_watchdog(&directory);
     // `taskkill /F` 讓服務沒機會記關閉紀錄。這是安裝／更新有意的停止,不是當機:
     // 清掉 running.json,下一次啟動才不會誤報「上次未正常關閉」(真正被強制結束的仍由偵測補上)。
-    crate::running_service::remove(&layout.directory());
+    crate::running_service::remove(&directory);
+    Ok(())
 }
 
 /// 停止並取消登記，刪除登記檔;沒有登記時不算失敗。
@@ -132,7 +166,7 @@ pub(super) fn unregister(system: &mut impl HostSystem, layout: &ServiceLayout, u
         InstallPlatform::Windows => {
             // 先取消登記再停服務:停的當下不會有人(登入、看門狗)把它再帶起來。
             let _ = system.run("reg", &arguments(&["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]));
-            stop_windows_background(system, layout, user_name);
+            stop_windows_background(system, layout, user_name)?;
         }
     }
     if let Some(file) = registration_file(layout) {
@@ -159,8 +193,14 @@ fn wait_until_unloaded(system: &mut impl HostSystem, job: &str) {
 }
 
 /// 看門狗說明:只有 Windows 的背景執行檔有(macOS launchd、Linux systemd 由系統重啟)。
-pub(super) fn auto_restart_note(layout: &ServiceLayout) -> Option<&'static str> {
-    (layout.platform == InstallPlatform::Windows).then_some("watchdog (restarts the service if it disappears)")
+/// 依看門狗實際狀態(`watchdog.json` 與程序表),不是只看有沒有登記。
+pub(super) fn auto_restart_note(layout: &ServiceLayout) -> Option<String> {
+    (layout.platform == InstallPlatform::Windows).then(|| {
+        crate::supervisor::watchdog_note(
+            crate::supervisor::read_watchdog(&layout.directory()).as_ref(),
+            &crate::shutdown::SystemProcesses,
+        )
+    })
 }
 
 /// 系統是否登記了自動啟動。
