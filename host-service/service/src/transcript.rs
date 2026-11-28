@@ -106,7 +106,7 @@ fn is_safe_reported_path(path: &str) -> bool {
 /// `${CODEX_HOME:-~/.codex}` 的 sessions 與 archived_sessions 下的 `rollout-*-<id>.jsonl`(含倒帶的 `_<rolloutId>`,§4.2)。
 /// 不只一個時(SSH 路線問 Codex 的狀態資料庫;主機服務不執行指令也不開 SQLite)改看各檔第一行 session_meta:
 /// 先留下 `payload.id` 是這個 session 的，有 `cwd`(pane 的工作目錄)時再留下 cwd 相同的;
-/// 還有多個就取 `payload.timestamp` 唯一最新的(倒帶產生的 rollout 較新)。仍分不出來回有歧義，不猜。
+/// 候選有 `cwd` 卻都不符時回有歧義(不略過 cwd 改取最新);還有多個就取 `payload.timestamp` 唯一最新的(倒帶產生的 rollout 較新)。仍分不出來回有歧義，不猜。
 pub(crate) fn locate_codex(environment: &TranscriptEnvironment, session_id: &str, cwd: Option<&str>) -> Result<PathBuf, TranscriptFailure> {
     let codex_home = codex_home(environment);
     let mut rollouts = Vec::new();
@@ -150,6 +150,10 @@ fn pick_codex_rollout(rollouts: Vec<PathBuf>, session_id: &str, cwd: Option<&str
             .collect();
         if !same_cwd.is_empty() {
             candidates = same_cwd;
+        } else if candidates.iter().any(|(_, candidate, _)| candidate.is_some()) {
+            // 候選有 cwd 卻沒有一個相符:不靜默略過 cwd 改取最新的(可能選到別的專案),不猜。
+            // 只有候選的 cwd 都讀不到時才退到 timestamp 規則。
+            return Err(TranscriptFailure::Ambiguous);
         }
     }
     if candidates.len() == 1 {

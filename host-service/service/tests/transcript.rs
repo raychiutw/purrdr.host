@@ -213,6 +213,41 @@ async fn locate_picks_the_newest_codex_rollout_when_cwd_cannot_tell_them_apart()
 }
 
 #[tokio::test]
+async fn locate_stays_ambiguous_when_no_codex_rollout_has_the_pane_cwd() {
+    let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
+    fixture.write(
+        &format!(".codex/sessions/2026/11/17/rollout-a-{CODEX_SESSION}.jsonl"),
+        &codex_meta("/Users/demo/Projects/other", "2026-11-17T09:00:00Z"),
+    );
+    fixture.write(
+        &format!(".codex/sessions/2026/11/18/rollout-b-{CODEX_SESSION}_7.jsonl"),
+        &codex_meta("/Users/demo/Projects/elsewhere", "2026-11-18T09:00:00Z"),
+    );
+
+    let reply = fixture.client().await.request(locate("r1", "id", CODEX_SESSION)).await;
+
+    assert_eq!(reply["code"], "transcript_ambiguous", "{reply}");
+}
+
+#[tokio::test]
+async fn locate_falls_back_to_the_newest_codex_rollout_when_no_header_has_a_cwd() {
+    let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
+    let without_cwd = |timestamp: &str| format!("{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{CODEX_SESSION}\",\"timestamp\":\"{timestamp}\"}}}}\n");
+    fixture.write(
+        &format!(".codex/sessions/2026/11/17/rollout-a-{CODEX_SESSION}.jsonl"),
+        &without_cwd("2026-11-17T09:00:00Z"),
+    );
+    let newest = fixture.write(
+        &format!(".codex/sessions/2026/11/18/rollout-b-{CODEX_SESSION}_7.jsonl"),
+        &without_cwd("2026-11-18T09:00:00Z"),
+    );
+
+    let reply = fixture.client().await.request(locate("r1", "id", CODEX_SESSION)).await;
+
+    assert_eq!(reply["path"], path_text(&newest), "{reply}");
+}
+
+#[tokio::test]
 async fn locate_stays_ambiguous_for_codex_rollouts_that_are_indistinguishable() {
     let fixture = Fixture::start(snapshot_with("codex", "id", CODEX_SESSION)).await;
     let same = codex_meta("/Users/demo/Projects/demo", "2026-11-17T09:00:00Z");
