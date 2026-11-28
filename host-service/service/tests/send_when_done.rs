@@ -433,7 +433,8 @@ async fn a_slow_queue_paused_push_does_not_block_the_next_pane() {
     let backend = FakePushBackend::start();
     pair(home.path(), "phone", &backend.endpoint(), PHONE_KEY, &[]);
     let service = observing_with_home(&herdr, home.path()).await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // 等啟動時的對帳(snapshot 各 1 秒)做完,免得干擾計時。
+    tokio::time::sleep(Duration::from_millis(4000)).await;
     let mut client = connect(&service).await;
     add(&mut client, "w1:pA", "for the old chat", "00000000-0000-0000-0000-0000000000ff").await;
     add(&mut client, "w1:pB", "marker", PB_SESSION).await;
@@ -443,6 +444,10 @@ async fn a_slow_queue_paused_push_does_not_block_the_next_pane() {
     herdr.push_event(status("w1:pB", "idle"));
     herdr.wait_until(|herdr| !prompts(herdr).is_empty()).await;
 
-    // pA 的 guard 1 秒 + pB 的 guard 1 秒 ≈ 2 秒;推播若卡在迴圈裡會再多 1 秒以上。
-    assert!(started.elapsed() < Duration::from_millis(2500), "pB 被 queue_paused 推播拖慢:{:?}", started.elapsed());
+    // pA 的 guard 1 秒 + pB 的 guard 1 秒 ≈ 2 秒;推播若卡在迴圈裡會再多 1 秒(下限 3 秒)。
+    assert!(
+        started.elapsed() < Duration::from_millis(2600),
+        "pB 被 queue_paused 推播拖慢:{:?}",
+        started.elapsed()
+    );
 }

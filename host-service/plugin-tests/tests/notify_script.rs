@@ -1041,7 +1041,12 @@ fi
         let host = Host::new();
         host.write(".purrdr/plugin-state/work-w2_p1", "working_since=invalid\n");
         let earlier = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
-        std::fs::File::options().write(true).open(host.work_file()).unwrap().set_modified(earlier).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(host.work_file())
+            .unwrap()
+            .set_modified(earlier)
+            .unwrap();
 
         host.run_status("working");
 
