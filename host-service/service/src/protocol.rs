@@ -321,7 +321,81 @@ pub struct AgentsListResult {
     /// herdr session.snapshot 的每個 Tab(順序同 herdr)。tab.rename 之後下一次 agents.list 反映新名稱;要即時得知可訂閱 herdr 的 tab.renamed、tab.created、tab.closed 事件(events.subscribe),收到後重讀 agents.list。舊版主機服務沒有這個欄位;snapshot 沒有 tabs 時為空陣列。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tabs: Option<Vec<Tab>>,
+    /// herdr session.snapshot 的每個 Pane(含沒有 Agent 的純終端機 Pane,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 panes 時為空陣列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panes: Option<Vec<Pane>>,
+    /// herdr session.snapshot 的每個 Tab 的版面(Pane 排列與分割,順序同 herdr)。舊版主機服務沒有這個欄位;snapshot 沒有 layouts 時為空陣列。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layouts: Option<Vec<Layout>>,
     pub agents: Vec<Agent>,
+}
+
+/// herdr session.snapshot 的 Pane(欄位名照 herdr 原樣)。純終端機 Pane 沒有 agent 與 agent_session,agent_status 為 unknown。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pane {
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_id: Option<String>,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub focused: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_cwd: Option<String>,
+    /// herdr 的 agent 名稱，例如 claude、codex;純終端機 Pane 省略。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub agent_status: AgentStatus,
+    /// 終端機標題原文(含狀態符號)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title: Option<String>,
+    /// 去掉狀態符號的終端機標題。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_title_stripped: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_session: Option<AgentSession>,
+}
+
+/// herdr session.snapshot 的 Tab 版面(座標單位為終端機儲存格)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Layout {
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub zoomed: bool,
+    pub area: LayoutRect,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub focused_pane_id: Option<String>,
+    pub panes: Vec<LayoutPane>,
+    /// Tab 內的分割(由外而內,沒分割時為空陣列)。
+    pub splits: Vec<LayoutSplit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutPane {
+    pub pane_id: String,
+    pub focused: bool,
+    pub rect: LayoutRect,
+}
+
+/// Tab 版面裡的一個分割(herdr 原樣)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutSplit {
+    /// 例如 split_0_root。
+    pub id: String,
+    /// herdr 的分割方向:right(左右分)或 down(上下分)。
+    pub direction: String,
+    /// 第一個子區塊佔分割區的比例(0 到 1)。
+    pub ratio: f64,
+    pub rect: LayoutRect,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LayoutRect {
+    pub x: i64,
+    pub y: i64,
+    pub width: i64,
+    pub height: i64,
 }
 
 /// herdr 的 Tab。
