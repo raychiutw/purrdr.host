@@ -77,10 +77,18 @@ track_work() {
   case $status in
     working)
       _stale=
-      if [ -f "$_file" ] && _since=$(read_work_start "$_file") && [ "$((_now - _since))" -gt 86400 ]; then _stale=1; fi
+      if [ -f "$_file" ]; then
+        if _since=$(read_work_start "$_file"); then
+          [ "$((_now - _since))" -gt 86400 ] && _stale=1
+        elif [ -n "$(find "$_file" -mmin +1440 2>/dev/null)" ]; then
+          # 讀不出開始時間(例如 invalid 標記):改用檔案修改時間套同樣的 24 小時過期。
+          _stale=1
+        fi
+      fi
       if [ -f "$_file" ] && [ -z "$_stale" ]; then
         # 上一段還沒結束又收到 working(重複或亂序):這一段的開始時間不可信，作廢(留到 done 或 blocked 才清)。
-        write_state "$_file" 'working_since=invalid'
+        # 已經是 invalid 就不重寫,讓修改時間停在第一次作廢的時候,24 小時後才過得了期。
+        grep -qx 'working_since=invalid' "$_file" 2>/dev/null || write_state "$_file" 'working_since=invalid'
       else
         write_state "$_file" "working_since=$_now"
       fi
