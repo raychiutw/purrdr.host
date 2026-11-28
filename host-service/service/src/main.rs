@@ -42,8 +42,14 @@ All install options: https://raychiutw.github.io/purrdr/host-service/#install-op
 For AI agents:       https://raychiutw.github.io/purrdr/host-service/llms.txt
 ";
 
-#[tokio::main]
-async fn main() -> ExitCode {
+/// 結束訊號之後最多再等這麼久讓 `spawn_blocking` 的工作收尾,之後直接結束程序。
+const BLOCKING_TASK_GRACE: std::time::Duration = std::time::Duration::from_secs(3);
+
+fn main() -> ExitCode {
+    purrdr_host_service::shutdown::run_with_grace(run(), BLOCKING_TASK_GRACE)
+}
+
+async fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if matches!(arguments.as_slice(), [command] if command == "help" || command == "--help" || command == "-h") {
         print!("{HELP}");
