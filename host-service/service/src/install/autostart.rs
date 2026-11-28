@@ -79,6 +79,10 @@ pub(super) fn restart(system: &mut impl HostSystem, layout: &ServiceLayout, serv
     match layout.platform {
         InstallPlatform::MacOs => {
             let domain = gui_domain(system)?;
+            // `kickstart -k` 是強制結束,服務記不到關閉紀錄。這是有意的重啟,不是當機:先清掉 running.json,
+            // 新程序才不會誤報「上次未正常關閉」(真正被強制結束的仍由啟動偵測補上)。
+            // Linux 的 `systemctl restart` 送 SIGTERM,服務走正常關閉自己清,不需處理。
+            crate::running_service::remove(&layout.directory());
             run_checked(
                 system,
                 "launchctl",

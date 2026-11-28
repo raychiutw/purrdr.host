@@ -791,6 +791,25 @@ fn restart_counts_only_when_the_running_service_reports_the_new_version() {
 }
 
 #[test]
+fn an_intentional_restart_is_not_left_looking_like_a_crash() {
+    // macOS 的 kickstart -k 是強制結束,服務記不到關閉紀錄,所以重啟的人要清掉 running.json;Linux 靠 SIGTERM 正常關閉。
+    for platform in [InstallPlatform::MacOs, InstallPlatform::Linux] {
+        let mut installed = InstalledHost::new(platform);
+        let server = FakeReleaseServer::start();
+        publish(&server, platform, "0.5.1", "");
+        let mut updater = installed.updater(&server);
+
+        assert!(matches!(updater.apply(), Ok(UpdateOutcome::Updated { .. })), "{platform:?}");
+
+        assert_eq!(
+            updater.location().system().state.stale_marker_starts,
+            0,
+            "{platform:?}:重啟後新程序不該看到舊的 running.json"
+        );
+    }
+}
+
+#[test]
 fn only_one_update_runs_at_a_time() {
     let mut installed = InstalledHost::new(InstallPlatform::Linux);
     let mut other_update = installed.another_location();
