@@ -38,6 +38,21 @@ pub fn remove(state_directory: &Path) {
     let _ = std::fs::remove_file(state_directory.join(FILE_NAME));
 }
 
+/// 取走 `running.json` 的原文(刪掉檔案);呼叫端在後續操作失敗時用 [`restore`] 放回去。沒有檔案回 None。
+pub fn take(state_directory: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(state_directory.join(FILE_NAME)).ok()?;
+    remove(state_directory);
+    Some(content)
+}
+
+/// 放回 [`take`] 取走的內容;這段期間已有新的 `running.json`(新程序寫的)就不動它。
+pub fn restore(state_directory: &Path, content: &str) {
+    let file = state_directory.join(FILE_NAME);
+    if !file.exists() {
+        let _ = std::fs::write(file, content);
+    }
+}
+
 pub fn unix_millis(time: SystemTime) -> u64 {
     time.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_millis() as u64)
 }

@@ -1,9 +1,11 @@
 //! Windows 看門狗的重啟策略(#112):間隔、次數上限、停止標記。
 
 use std::io;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use purrdr_host_service::supervisor::{ChildExit, Outcome, Policy, Supervised, supervise};
+use purrdr_host_service::shutdown::ProcessTable;
+use purrdr_host_service::supervisor::{self, ChildExit, Outcome, Policy, Supervised, WatchdogRecord, WatchdogState, supervise};
 
 const SECOND: Duration = Duration::from_secs(1);
 
@@ -145,9 +147,125 @@ fn a_child_that_cannot_be_launched_counts_as_a_failure() {
 fn stop_marker_helpers_create_and_clear_the_file() {
     let directory = std::env::temp_dir().join(format!("purrdr-supervisor-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&directory);
-    purrdr_host_service::supervisor::request_stop(&directory);
+    purrdr_host_service::supervisor::request_stop(&directory).unwrap();
     assert!(purrdr_host_service::supervisor::stop_marker(&directory).is_file());
     purrdr_host_service::supervisor::clear_stop(&directory);
     assert!(!purrdr_host_service::supervisor::stop_marker(&directory).exists());
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+// --- 第一輪 code review 修正(#113) ---
+
+#[test]
+fn clean_exit_after_a_signal_shutdown_is_treated_as_an_intentional_stop() {
+    // 登出、關機、console close 訊號讓服務走正常關閉(結束碼 0):是有意停止,看門狗不該把它拉回來。
+    let mut fake = Fake::exiting(vec![(Some(0), 3600)]);
+
+    assert_eq!(supervise(&mut fake, &Policy::default()), Outcome::StopRequested);
+    assert_eq!(fake.launches, 1);
+    assert!(fake.sleeps.is_empty());
+}
+
+#[test]
+fn watchdog_ties_the_child_to_its_own_lifetime_with_a_job_object() {
+    // 只能在 Windows 驗證行為;這裡守住「有設 KILL_ON_JOB_CLOSE 並且 windows-sys 開了對應 feature」。
+    let source = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/supervisor.rs")).unwrap();
+    let manifest = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml")).unwrap();
+    assert!(source.contains("JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE"));
+    assert!(manifest.contains("Win32_System_JobObjects"));
+}
+
+#[test]
+fn request_stop_reports_when_the_marker_cannot_be_written() {
+    let directory = std::env::temp_dir().join(format!("purrdr-supervisor-stop-failure-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(supervisor::stop_marker(&directory)).unwrap(); // 標記的位置被資料夾佔住,寫不進去
+
+    assert!(supervisor::request_stop(&directory).is_err());
+
+    std::fs::remove_dir_all(&directory).unwrap();
+}
+
+#[test]
+fn waiting_for_the_old_processes_stops_as_soon_as_they_are_gone() {
+    let mut checks = 0;
+    let mut sleeps = 0;
+    let gone = supervisor::wait_until_gone(
+        || {
+            checks += 1;
+            checks < 4
+        },
+        |_| sleeps += 1,
+        Duration::from_millis(100),
+        50,
+    );
+    assert!(gone);
+    assert_eq!((checks, sleeps), (4, 3));
+}
+
+#[test]
+fn waiting_for_the_old_processes_gives_up_after_the_attempt_limit() {
+    let mut sleeps = 0;
+    let gone = supervisor::wait_until_gone(|| true, |_| sleeps += 1, Duration::from_millis(100), 5);
+    assert!(!gone);
+    assert_eq!(sleeps, 5);
+}
+
+#[test]
+fn state_directory_resolution_explains_why_supervision_is_disabled() {
+    let arguments = |texts: &[&str]| texts.iter().map(|text| (*text).to_owned()).collect::<Vec<_>>();
+
+    assert_eq!(
+        supervisor::resolve_state_directory(&arguments(&["--state-dir", "/data"]), || None),
+        Ok(PathBuf::from("/data"))
+    );
+    assert_eq!(
+        supervisor::resolve_state_directory(&arguments(&["--port", "1"]), || Some(PathBuf::from("/home/x/.purrdr/host-service"))),
+        Ok(PathBuf::from("/home/x/.purrdr/host-service"))
+    );
+    let missing_value = supervisor::resolve_state_directory(&arguments(&["--state-dir"]), || Some(PathBuf::from("/default"))).unwrap_err();
+    assert!(missing_value.contains("--state-dir"), "{missing_value}");
+    let no_home = supervisor::resolve_state_directory(&arguments(&[]), || None).unwrap_err();
+    assert!(no_home.contains("home"), "{no_home}");
+}
+
+struct FakeProcesses {
+    alive: bool,
+}
+
+impl ProcessTable for FakeProcesses {
+    fn is_alive(&self, _pid: u32) -> bool {
+        self.alive
+    }
+}
+
+#[test]
+fn watchdog_note_reflects_the_actual_state() {
+    let record = |state| WatchdogRecord {
+        pid: 10,
+        state,
+        started_at_ms: 1_000,
+    };
+    let alive = FakeProcesses { alive: true };
+    let gone = FakeProcesses { alive: false };
+
+    assert!(supervisor::watchdog_note(Some(&record(WatchdogState::Running)), &alive).starts_with("watchdog running"));
+    assert!(supervisor::watchdog_note(Some(&record(WatchdogState::Running)), &gone).starts_with("watchdog not running"));
+    assert!(supervisor::watchdog_note(None, &alive).starts_with("watchdog not running"));
+    assert!(supervisor::watchdog_note(Some(&record(WatchdogState::GaveUp)), &gone).starts_with("watchdog gave up"));
+}
+
+#[test]
+fn watchdog_record_round_trips_through_the_state_directory() {
+    let directory = std::env::temp_dir().join(format!("purrdr-supervisor-record-{}", std::process::id()));
+    let record = WatchdogRecord {
+        pid: 77,
+        state: WatchdogState::GaveUp,
+        started_at_ms: 5,
+    };
+    supervisor::write_watchdog(&directory, &record).unwrap();
+    assert_eq!(supervisor::read_watchdog(&directory), Some(record));
+    supervisor::remove_watchdog(&directory);
+    assert_eq!(supervisor::read_watchdog(&directory), None);
     let _ = std::fs::remove_dir_all(&directory);
 }

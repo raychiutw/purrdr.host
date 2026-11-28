@@ -124,9 +124,36 @@ async fn status_reports_the_windows_watchdog_only_where_it_exists() {
 
         let status = installer.status(&socket_environment_at("purrdr-status-test-missing-socket")).await;
 
-        let has_line = status
-            .to_string()
-            .contains("  auto restart: watchdog (restarts the service if it disappears)\n");
-        assert_eq!(has_line, platform == InstallPlatform::Windows, "{platform:?}: {status}");
+        // 只登記了、看門狗沒有真的在跑(沒有 watchdog.json):不能說有看門狗在監看。
+        let report = status.to_string();
+        assert_eq!(
+            report.contains("  auto restart: watchdog not running"),
+            platform == InstallPlatform::Windows,
+            "{platform:?}: {status}"
+        );
+        assert!(!report.contains("watchdog running"), "{platform:?}: {status}");
     }
+}
+
+#[tokio::test]
+async fn status_follows_the_watchdog_state_file() {
+    use purrdr_host_service::supervisor::{WatchdogRecord, WatchdogState, write_watchdog};
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    installer.install(&host.options(reserved_port()), |_| true).unwrap();
+    let now = purrdr_host_service::running_service::unix_millis(std::time::SystemTime::now());
+    let socket = socket_environment_at("purrdr-status-test-missing-socket");
+    let record = |state| WatchdogRecord {
+        pid: std::process::id(),
+        state,
+        started_at_ms: now,
+    };
+
+    write_watchdog(&host.service_directory(), &record(WatchdogState::Running)).unwrap();
+    let running = installer.status(&socket).await.to_string();
+    write_watchdog(&host.service_directory(), &record(WatchdogState::GaveUp)).unwrap();
+    let gave_up = installer.status(&socket).await.to_string();
+
+    assert!(running.contains("  auto restart: watchdog running"), "{running}");
+    assert!(gave_up.contains("  auto restart: watchdog gave up"), "{gave_up}");
 }

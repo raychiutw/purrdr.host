@@ -105,5 +105,9 @@ fn supervisor_only_relaunches_its_own_executable() {
 
     assert_eq!(source.matches("Command::new(").count(), 1, "只能有一個子行程");
     assert!(source.contains("Command::new(&self.executable)"));
-    assert!(source.contains("let executable = std::env::current_exe().ok()?;"), "子程序只能是自己的執行檔");
+    assert_eq!(source.matches("std::env::current_exe()").count(), 1, "子程序的執行檔只能來自 current_exe()");
+    assert!(
+        source.contains(".map(|executable| (directory, executable))"),
+        "current_exe() 的結果直接成為子程序的執行檔"
+    );
 }

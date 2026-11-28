@@ -170,6 +170,49 @@ fn windows_stops_ask_the_watchdog_not_to_restart_and_start_clears_the_request() 
 }
 
 #[test]
+fn windows_stop_that_cannot_leave_the_marker_does_not_kill_the_service() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    // 標記的位置被資料夾佔住,寫不進去:此時 taskkill 會讓看門狗把舊服務拉回來,所以不能繼續。
+    std::fs::create_dir(host.service_directory().join("stop-requested")).unwrap();
+    installer.system_mut().commands.clear();
+
+    assert!(installer.install(&host.options(PORT), |_| true).is_err());
+    assert!(installer.uninstall().is_err());
+
+    assert!(
+        installer.system().commands.iter().all(|command| !command.starts_with("taskkill")),
+        "{:?}",
+        installer.system().commands
+    );
+}
+
+#[test]
+fn windows_stop_waits_for_the_old_service_to_exit_before_clearing_the_marker() {
+    let host = TestHost::new(InstallPlatform::Windows);
+    let mut installer = Installer::new(host.environment(), FakeSystem::ready(&host.home.0));
+    let marker = host.service_directory().join("stop-requested");
+    installer.install(&host.options(PORT), |_| true).unwrap();
+    std::fs::write(
+        host.service_directory().join("running.json"),
+        r#"{"version":"0.17.0","port":47820,"pid":4242,"started_at_ms":1795860000000}"#,
+    )
+    .unwrap();
+    installer.system_mut().lingering_checks = 3;
+
+    installer.install(&host.options(PORT), |_| true).unwrap();
+
+    let checks = &installer.system().process_checks;
+    assert_eq!(checks.len(), 4, "舊服務還活著的 3 次加上確認消失的 1 次:{checks:?}");
+    assert!(
+        checks.iter().all(|(pid, marker_present)| *pid == 4242 && *marker_present),
+        "等的期間標記要還在:{checks:?}"
+    );
+    assert!(!marker.exists());
+}
+
+#[test]
 fn windows_uninstall_from_installed_copy_removes_files_after_it_exits() {
     let host = TestHost::new(InstallPlatform::Windows);
     let home_before = snapshot(&host.home.0);

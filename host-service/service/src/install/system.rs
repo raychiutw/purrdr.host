@@ -21,6 +21,10 @@ pub trait HostSystem {
     fn spawn_detached(&mut self, program: &str, arguments: &[String]) -> std::io::Result<()>;
     /// 這個行程結束後刪除資料夾，再刪除仍是空的 `empty_directories`(Windows 不能刪除執行中的執行檔)。
     fn remove_directory_after_exit(&mut self, directory: &Path, empty_directories: &[PathBuf]) -> std::io::Result<()>;
+    /// 這個 pid 的程序還在不在(不執行外部指令);停止服務後確認舊程序真的結束用。測試的假系統可覆寫。
+    fn process_exists(&mut self, pid: u32) -> bool {
+        crate::shutdown::ProcessTable::is_alive(&crate::shutdown::SystemProcesses, pid)
+    }
     /// Windows 使用者層級 PATH(`HKCU\Environment` 的 `Path`,不展開 `%…%` 的原始值);沒有這個值時 None。
     fn user_path(&mut self) -> std::io::Result<Option<String>>;
     /// 寫入 Windows 使用者層級 PATH(None 刪除這個值),並通知其他程式環境變數已變更。
