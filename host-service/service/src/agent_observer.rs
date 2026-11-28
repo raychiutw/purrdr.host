@@ -282,11 +282,11 @@ pub(crate) fn spawn(
                     if let Some(home) = home.as_deref() {
                         for (pane_id, kind) in missed {
                             let (herdr, home) = (herdr.clone(), home.to_owned());
-                            tokio::spawn(async move { push(&herdr, &home, &pane_id, kind).await });
+                            tokio::spawn(async move { push(&herdr, &home, &pane_id, kind, None).await });
                         }
                     }
                     for (pane_id, status) in &current {
-                        attention.status(pane_id, status, Instant::now());
+                        attention.snapshot_status(pane_id, status, Instant::now());
                     }
                     // 斷線期間做完的 Agent:重連前還是 working、現在已 idle／done,照樣送出佇列。
                     let finished: Vec<String> = current
@@ -315,7 +315,10 @@ pub(crate) fn spawn(
                                 continue;
                             };
                             {
-                                attention.status(&pane_id, &status, Instant::now());
+                                let now = Instant::now();
+                                // 要在 status() 之前算:done 的期間會把開始時間清掉。
+                                let work_seconds = if status == "done" { attention.finish_work(&pane_id, now) } else { None };
+                                attention.status(&pane_id, &status, now);
                                 let previous = statuses.insert(pane_id.clone(), status.clone());
                                 if previous.as_deref() == Some("working") && is_finished(&status) {
                                     send_next(&herdr, &observer, &pane_id, home.as_deref()).await;
@@ -327,7 +330,7 @@ pub(crate) fn spawn(
                                     && let Some(home) = home.as_deref()
                                 {
                                     let (herdr, home, pane_id) = (herdr.clone(), home.to_owned(), pane_id.clone());
-                                    tokio::spawn(async move { push(&herdr, &home, &pane_id, kind).await });
+                                    tokio::spawn(async move { push(&herdr, &home, &pane_id, kind, work_seconds).await });
                                 }
                             }
                         }
@@ -393,12 +396,12 @@ async fn check_attention(herdr: &HerdrClient, attention: &mut AttentionDetector,
     // 另開 task 送：後台慢的時候不擋住 Send When Done 的事件處理。
     for (pane_id, status) in alerts {
         let (herdr, home) = (herdr.clone(), home.to_owned());
-        tokio::spawn(async move { push(&herdr, &home, &pane_id, status).await });
+        tokio::spawn(async move { push(&herdr, &home, &pane_id, status, None).await });
     }
 }
 
 /// 推播一則 Agent 狀態:workspace 名稱與 session(靜音比對)取自當下的 snapshot。
-async fn push(herdr: &HerdrClient, home: &Path, pane_id: &str, status: &'static str) {
+async fn push(herdr: &HerdrClient, home: &Path, pane_id: &str, status: &'static str, work_seconds: Option<u64>) {
     let Ok(snapshot) = herdr.request("session.snapshot", json!({})).await else {
         return;
     };
@@ -417,6 +420,7 @@ async fn push(herdr: &HerdrClient, home: &Path, pane_id: &str, status: &'static 
             &pane_id,
             session.as_deref(),
             tab.as_deref(),
+            work_seconds,
         );
     })
     .await;
@@ -543,7 +547,7 @@ async fn send_next(herdr: &HerdrClient, observer: &AgentObserver, pane_id: &str,
                 && newly_paused
                 && let Some(home) = home
             {
-                push(herdr, home, pane_id, "queue_paused").await;
+                push(herdr, home, pane_id, "queue_paused", None).await;
             }
             return;
         }
