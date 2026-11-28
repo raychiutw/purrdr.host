@@ -861,6 +861,380 @@ fi
 
         assert_eq!(host.keys(), [key_a()]);
     }
+
+    // MARK: - 完成帶工作秒數(raychiutw/purrdr.host#96)與方案用量(#98)
+
+    impl Host {
+        /// 外掛自己的狀態檔(不以 `push-` 開頭，不會被當成配對資料夾)。
+        fn work_file(&self) -> PathBuf {
+            self.path(".purrdr/plugin-state/work-w2_p1")
+        }
+
+        /// 預先放一筆「開始工作」時間，模擬外掛在 `seconds_ago` 秒前看到 working。
+        fn started(&self, seconds_ago: u64) {
+            self.write(".purrdr/plugin-state/work-w2_p1", &format!("working_since={}\n", now() - seconds_ago));
+        }
+
+        fn run_status(&self, status: &str) -> i32 {
+            self.run_hook(&event(status, "w2:p1"), &default_context())
+        }
+
+        /// 假 Claude status line 用量檔(`~/.purrdr/claude-usage/usage.json`，格式見 `claude-usage/statusline.sh`)。
+        fn usage(&self, five_hour: &str, seven_day: &str) {
+            self.write(
+                ".purrdr/claude-usage/usage.json",
+                &format!(
+                    "{{\"captured_at\":{},\"status_line_input\":{{\"session_id\":\"s\",\"rate_limits\":{{\"five_hour\":{five_hour},\"seven_day\":{seven_day}}}}}}}\n",
+                    now()
+                ),
+            );
+        }
+
+        fn usage_calls(&self) -> Vec<Map<String, Value>> {
+            self.curl_calls()
+                .into_iter()
+                .map(|call| call.body)
+                .filter(|body| body["status"] == "usage")
+                .collect()
+        }
+    }
+
+    fn period(percentage: &str, resets_at: u64) -> String {
+        format!("{{\"used_percentage\":{percentage},\"resets_at\":{resets_at}}}")
+    }
+
+    fn idle_period() -> String {
+        period("10", now() + 3 * 3600)
+    }
+
+    fn work_seconds_of(host: &Host) -> Option<Value> {
+        host.curl_calls().first().expect("有送出推播").body.get("workSeconds").cloned()
+    }
+
+    /// working 事件:只記開始時間(在外掛狀態檔，不是 push-*),不對後台送任何東西
+    #[test]
+    fn working_records_the_start_and_sends_nothing() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        assert_eq!(host.run_status("working"), 0);
+
+        assert!(host.curl_calls().is_empty());
+        let recorded = std::fs::read_to_string(host.work_file()).expect("有記開始時間");
+        assert!(recorded.starts_with("working_since="), "{recorded}");
+        let pairings: Vec<String> = std::fs::read_dir(host.path(".purrdr"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.starts_with("push-"))
+            .collect();
+        assert_eq!(pairings, ["push-a1"]);
+    }
+
+    /// working 之後 done:done 帶 workSeconds(整數、非負),並清掉開始時間
+    #[test]
+    fn done_after_working_carries_work_seconds_and_clears_the_start() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+
+        host.run_status("working");
+        host.run_status("done");
+
+        let seconds = work_seconds_of(&host).expect("done 帶 workSeconds");
+        assert!(seconds.as_u64().is_some_and(|seconds| seconds <= 10), "{seconds}");
+        assert!(!host.work_file().exists());
+    }
+
+    /// 開始時間在 120 秒前:workSeconds 約 120
+    #[test]
+    fn done_reports_elapsed_seconds_from_the_recorded_start() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.started(120);
+
+        host.run_status("done");
+
+        let seconds = work_seconds_of(&host).and_then(|seconds| seconds.as_u64()).expect("done 帶 workSeconds");
+        assert!((120..=130).contains(&seconds), "{seconds}");
+    }
+
+    /// 算不出來一律省略欄位(不帶 0):done 先於 working、重啟後沒有開始時間、已經用掉、重複 working、時間倒退、檔案壞掉、太久以前
+    #[test]
+    fn work_seconds_is_omitted_when_it_cannot_be_computed() {
+        // 沒有開始時間(重啟後遺失，或 done 先於 working)。
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.run_status("done");
+        assert_eq!(work_seconds_of(&host), None);
+
+        // 同一段工作只算一次:第二個 done 沒有開始時間。
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.started(60);
+        host.run_status("done");
+        host.run_status("done");
+        assert_eq!(host.curl_calls().last().unwrap().body.get("workSeconds"), None);
+
+        // 重複 working(中間沒有 done):順序不可信，這一段省略。
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.run_status("working");
+        host.run_status("working");
+        host.run_status("done");
+        assert_eq!(work_seconds_of(&host), None);
+
+        // 時間倒退(開始時間比現在晚)。
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write(".purrdr/plugin-state/work-w2_p1", &format!("working_since={}\n", now() + 3600));
+        host.run_status("done");
+        assert_eq!(work_seconds_of(&host), None);
+
+        // 壞掉的狀態檔、前導零、太久以前的殘留。
+        for contents in [
+            "",
+            "working_since=abc\n",
+            "working_since=08\n",
+            "working_since=-5\n",
+            &format!("working_since={}\n", now() - 3 * 86400),
+        ] {
+            let host = Host::new();
+            host.pair("a1", &key_a(), &[]);
+            host.write(".purrdr/plugin-state/work-w2_p1", contents);
+            host.run_status("done");
+            assert_eq!(work_seconds_of(&host), None, "{contents:?}");
+        }
+    }
+
+    /// 太久以前的殘留開始時間(例如 pane 當掉沒收到 done)遇到新的 working 時直接換成新的，不誤判成重複
+    #[test]
+    fn a_stale_start_is_replaced_by_a_new_working_event() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write(".purrdr/plugin-state/work-w2_p1", &format!("working_since={}\n", now() - 3 * 86400));
+
+        host.run_status("working");
+        host.run_status("done");
+
+        let seconds = work_seconds_of(&host).and_then(|seconds| seconds.as_u64()).expect("done 帶 workSeconds");
+        assert!(seconds <= 10, "{seconds}");
+    }
+
+    /// blocked 結束這一段工作(使用者介入):之後再 working 是新的一段，done 只算新的一段
+    #[test]
+    fn blocked_ends_the_work_segment() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.started(3000);
+        host.run_status("blocked");
+        assert!(!host.work_file().exists());
+
+        host.run_status("working");
+        host.run_status("done");
+
+        let seconds = host.curl_calls().last().unwrap().body["workSeconds"].as_u64().expect("done 帶 workSeconds");
+        assert!(seconds <= 10, "{seconds}");
+    }
+
+    /// 不同 pane 各自記;pane id 形狀不對時不記也不帶
+    #[test]
+    fn each_pane_has_its_own_start_and_malformed_pane_has_none() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.started(200);
+
+        host.run_hook(&event("done", "w2:p9"), &default_context());
+        host.run_hook(&event("done", "w2:p1;rm"), &default_context());
+
+        assert!(host.curl_calls().iter().all(|call| !call.body.contains_key("workSeconds")));
+        assert!(host.work_file().exists(), "別的 pane 的 done 不動 w2:p1 的紀錄");
+    }
+
+    /// 主機服務讓位(lease 新鮮):不送 done(也就不帶 workSeconds),但仍清掉開始時間;working 照記(lease 失效後才接得上)
+    #[test]
+    fn fresh_lease_yields_work_seconds_but_still_tracks_the_start() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.lease(&socket, now());
+
+        host.run_hook_with_socket(&event("working", "w2:p1"), &default_context(), Some(&socket));
+        assert!(host.work_file().exists());
+        host.run_hook_with_socket(&event("done", "w2:p1"), &default_context(), Some(&socket));
+
+        assert!(host.curl_calls().is_empty());
+        assert!(!host.work_file().exists());
+    }
+
+    /// 用量 85%:送一則 usage，內容只有 key/status/agent/threshold/resetsAt,不帶 workspace、pane、tab
+    #[test]
+    fn usage_crossing_80_is_sent_without_workspace_pane_or_tab() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let resets = now() + 3 * 3600;
+        host.usage(&period("85.5", resets), &idle_period());
+
+        host.run_status("working");
+
+        let calls = host.curl_calls();
+        assert_eq!(calls.len(), 1, "只送一則,working 本身不推播");
+        let mut keys: Vec<&str> = calls[0].body.keys().map(String::as_str).collect();
+        keys.sort();
+        assert_eq!(keys, ["agent", "key", "resetsAt", "status", "threshold"]);
+        assert_eq!(calls[0].body["key"], key_a().as_str());
+        assert_eq!(calls[0].body["status"], "usage");
+        assert_eq!(calls[0].body["agent"], "claude");
+        assert_eq!(calls[0].body["threshold"], 80);
+        assert_eq!(calls[0].body["resetsAt"], resets);
+    }
+
+    /// 同一週期同一門檻只送一次(之後每次狀態改變都不重送);跨過 95 再補送 95
+    #[test]
+    fn each_threshold_is_sent_once_per_cycle() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let resets = now() + 3 * 3600;
+        host.usage(&period("82", resets), &idle_period());
+
+        host.run_status("working");
+        host.run_status("idle");
+        host.run_status("working");
+        assert_eq!(host.usage_calls().len(), 1);
+
+        host.usage(&period("96", resets), &idle_period());
+        host.run_status("working");
+        host.run_status("working");
+
+        let thresholds: Vec<Value> = host.usage_calls().iter().map(|body| body["threshold"].clone()).collect();
+        assert_eq!(thresholds, [80, 95].map(Value::from));
+    }
+
+    /// 一次跨過兩個門檻:80 與 95 各送一則;新的週期(resetsAt 不同)重新計
+    #[test]
+    fn crossing_both_thresholds_sends_two_and_a_new_cycle_resets_the_record() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.usage(&period("97", now() + 3600), &idle_period());
+
+        host.run_status("working");
+        assert_eq!(
+            host.usage_calls().iter().map(|body| body["threshold"].clone()).collect::<Vec<_>>(),
+            [80, 95].map(Value::from)
+        );
+
+        let next = now() + 5 * 3600;
+        host.usage(&period("90", next), &idle_period());
+        host.run_status("working");
+
+        let calls = host.usage_calls();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(
+            (calls[2]["threshold"].clone(), calls[2]["resetsAt"].clone()),
+            (Value::from(80), Value::from(next))
+        );
+    }
+
+    /// 五小時與七天兩個視窗各自判斷
+    #[test]
+    fn both_periods_are_checked() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let week = now() + 5 * 86400;
+        host.usage(&idle_period(), &period("96", week));
+
+        host.run_status("idle");
+
+        let calls = host.usage_calls();
+        assert_eq!(calls.len(), 2);
+        assert!(calls.iter().all(|body| body["resetsAt"] == week));
+    }
+
+    /// 沒有用量檔、低於門檻、沒有重置時間、已過重置時間、檔案壞掉:不送
+    #[test]
+    fn usage_is_not_sent_without_a_usable_reading() {
+        let future = now() + 3600;
+        let cases = [
+            None,
+            Some((idle_period(), idle_period())),
+            Some((period("99", now() - 10), period("99", now() - 10))),
+            Some(("{\"used_percentage\":99}".to_owned(), "{\"used_percentage\":99}".to_owned())),
+            Some((format!("{{\"used_percentage\":99,\"resets_at\":\"{future}\"}}"), idle_period())),
+        ];
+        for case in cases {
+            let host = Host::new();
+            host.pair("a1", &key_a(), &[]);
+            if let Some((five, seven)) = &case {
+                host.usage(five, seven);
+            }
+            host.run_status("working");
+            assert!(host.curl_calls().is_empty(), "{case:?}");
+        }
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.write(".purrdr/claude-usage/usage.json", "not json {");
+        host.run_status("working");
+        assert!(host.curl_calls().is_empty());
+    }
+
+    /// 主機服務讓位(lease 新鮮)時 usage 也不送;lease 失效後才由外掛送
+    #[test]
+    fn usage_yields_to_a_fresh_host_service_lease() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        let socket = socket_in(&host);
+        host.usage(&period("90", now() + 3600), &idle_period());
+        host.lease(&socket, now());
+
+        host.run_hook_with_socket(&event("working", "w2:p1"), &default_context(), Some(&socket));
+        assert!(host.curl_calls().is_empty());
+
+        host.lease(&socket, now() - 600);
+        host.run_hook_with_socket(&event("working", "w2:p1"), &default_context(), Some(&socket));
+        assert_eq!(host.usage_calls().len(), 1);
+    }
+
+    /// 沒有配對裝置:不送，也不記「已送過」(之後配對了還是會送)
+    #[test]
+    fn usage_is_not_marked_sent_when_nobody_received_it() {
+        let host = Host::new();
+        host.usage(&period("90", now() + 3600), &idle_period());
+        host.run_status("working");
+        assert!(host.curl_calls().is_empty());
+
+        host.pair("a1", &key_a(), &[]);
+        host.run_status("working");
+
+        assert_eq!(host.usage_calls().len(), 1);
+    }
+
+    /// usage 後台回 410:刪掉配對，同一事件的 blocked 推播也不再對它送
+    #[test]
+    fn usage_revoked_pairing_is_removed() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.respond(&key_a(), 410);
+        host.usage(&period("90", now() + 3600), &idle_period());
+
+        host.run_status("blocked");
+
+        assert!(!host.is_paired("a1"));
+        assert_eq!(host.curl_calls().len(), 1);
+    }
+
+    /// blocked 與用量同時發生:usage 與 blocked 各一則，blocked 內容不變
+    #[test]
+    fn usage_and_blocked_are_sent_separately() {
+        let host = Host::new();
+        host.pair("a1", &key_a(), &[]);
+        host.usage(&period("90", now() + 3600), &idle_period());
+
+        host.run_status("blocked");
+
+        let calls = host.curl_calls();
+        assert_eq!(calls.len(), 2);
+        let blocked: Vec<_> = calls.iter().filter(|call| call.body["status"] == "blocked").collect();
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].body["workspace"], "weather-app");
+    }
 }
 
 /// `notify.ps1` 的後台回應處理：真的以 Windows PowerShell 執行，後台換成本機的假 HTTP 伺服器。
@@ -1241,5 +1615,163 @@ mod notify_ps1 {
         }
 
         assert!(backend.keys().is_empty());
+    }
+
+    // MARK: - 完成帶工作秒數(raychiutw/purrdr.host#96)與方案用量(#98),與 notify_sh 同一組情境
+
+    fn work_file(host: &Host) -> PathBuf {
+        host.home.path().join(".purrdr").join("plugin-state").join("work-w2_p1")
+    }
+
+    fn seed_start(host: &Host, seconds_ago: u64) {
+        let path = work_file(host);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, format!("working_since={}\n", unix_now() - seconds_ago)).unwrap();
+    }
+
+    fn seed_usage(host: &Host, five_hour: &str, seven_day: &str) {
+        let directory = host.home.path().join(".purrdr").join("claude-usage");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(
+            directory.join("usage.json"),
+            format!(
+                "{{\"captured_at\":{},\"status_line_input\":{{\"session_id\":\"s\",\"rate_limits\":{{\"five_hour\":{five_hour},\"seven_day\":{seven_day}}}}}}}\n",
+                unix_now()
+            ),
+        )
+        .unwrap();
+    }
+
+    fn period(percentage: &str, resets_at: u64) -> String {
+        format!("{{\"used_percentage\":{percentage},\"resets_at\":{resets_at}}}")
+    }
+
+    fn idle_period() -> String {
+        period("10", unix_now() + 3 * 3600)
+    }
+
+    /// working 只記開始時間(不是 push-*),不呼叫後台;之後 done 帶 workSeconds 並清掉紀錄
+    #[test]
+    fn done_after_working_carries_work_seconds() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        host.run_hook_with_status("working");
+        assert!(backend.bodies().is_empty());
+        assert!(work_file(&host).exists());
+
+        host.run_hook_with_status("done");
+
+        let bodies = backend.bodies();
+        assert_eq!(bodies.len(), 1);
+        assert!(bodies[0]["workSeconds"].as_u64().is_some_and(|seconds| seconds <= 10), "{}", bodies[0]);
+        assert!(!work_file(&host).exists());
+    }
+
+    /// 開始時間在 120 秒前:workSeconds 約 120
+    #[test]
+    fn done_reports_elapsed_seconds_from_the_recorded_start() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        seed_start(&host, 120);
+
+        host.run_hook_with_status("done");
+
+        let seconds = backend.bodies()[0]["workSeconds"].as_u64().expect("done 帶 workSeconds");
+        assert!((120..=135).contains(&seconds), "{seconds}");
+    }
+
+    /// 算不出來一律省略:沒有開始時間、重複 working、時間倒退、壞掉的檔案;blocked 結束一段工作
+    #[test]
+    fn work_seconds_is_omitted_when_it_cannot_be_computed() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        // 沒有開始時間。
+        host.run_hook_with_status("done");
+        // 重複 working。
+        host.run_hook_with_status("working");
+        host.run_hook_with_status("working");
+        host.run_hook_with_status("done");
+        // 時間倒退。
+        let path = work_file(&host);
+        std::fs::write(&path, format!("working_since={}\n", unix_now() + 3600)).unwrap();
+        host.run_hook_with_status("done");
+        // 壞掉的檔案。
+        std::fs::write(&path, "working_since=08\n").unwrap();
+        host.run_hook_with_status("done");
+
+        let bodies = backend.bodies();
+        assert_eq!(bodies.len(), 4);
+        assert!(bodies.iter().all(|body| body.get("workSeconds").is_none()), "{bodies:?}");
+
+        // blocked 結束這一段,之後 working → done 只算新的一段。
+        seed_start(&host, 3000);
+        host.run_hook_with_status("blocked");
+        assert!(!work_file(&host).exists());
+    }
+
+    /// 用量跨過 80／95:各送一則(不帶 workspace、pane、tab),同一週期不重送
+    #[test]
+    fn usage_crossing_thresholds_is_sent_once_per_cycle() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        let resets = unix_now() + 3 * 3600;
+        seed_usage(&host, &period("97.5", resets), &idle_period());
+
+        host.run_hook_with_status("working");
+        host.run_hook_with_status("idle");
+
+        let bodies = backend.bodies();
+        assert_eq!(bodies.len(), 2, "{bodies:?}");
+        for (body, threshold) in bodies.iter().zip([80, 95]) {
+            assert_eq!(body["status"], "usage");
+            assert_eq!(body["agent"], "claude");
+            assert_eq!(body["threshold"], threshold);
+            assert_eq!(body["resetsAt"], resets);
+            assert!(
+                body.get("workspace").is_none() && body.get("pane").is_none() && body.get("tab").is_none(),
+                "{body}"
+            );
+        }
+    }
+
+    /// 沒有用量檔、低於門檻、沒有重置時間、已過期:不送
+    #[test]
+    fn usage_is_not_sent_without_a_usable_reading() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+
+        host.run_hook_with_status("working");
+        seed_usage(&host, &idle_period(), &idle_period());
+        host.run_hook_with_status("working");
+        seed_usage(&host, "{\"used_percentage\":99}", "{\"used_percentage\":99}");
+        host.run_hook_with_status("working");
+        seed_usage(&host, &period("99", unix_now() - 10), &period("99", unix_now() - 10));
+        host.run_hook_with_status("working");
+
+        assert!(backend.bodies().is_empty());
+    }
+
+    /// 主機服務讓位(lease 新鮮):usage 與 done(workSeconds)都不送,但仍清掉開始時間
+    #[test]
+    fn fresh_lease_yields_usage_and_work_seconds() {
+        let backend = Backend::start(HashMap::new());
+        let host = Host::new();
+        host.pair("a1", &key_a(), &backend.endpoint);
+        let socket = r"C:\herdr\herdr.sock";
+        write_lease(&host, socket, unix_now());
+        seed_usage(&host, &period("90", unix_now() + 3600), &idle_period());
+        seed_start(&host, 60);
+
+        host.run_hook_with("done", Some(socket));
+
+        assert!(backend.bodies().is_empty());
+        assert!(!work_file(&host).exists());
     }
 }
